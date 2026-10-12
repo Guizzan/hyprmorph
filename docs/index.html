@@ -1,0 +1,42 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>hyprmorph — Pixel morph for Hyprland</title>
+<meta name="description" content="Every window change is a swarm of pixels. A Hyprland plugin.">
+<style>
+:root{--bg:#07070c;--fg:#e9e9f2;--mute:#9a9ab0;--card:#11111a;--line:#24243a;--a:#ff5fd2;--b:#7a5cff}
+@media (prefers-color-scheme: light){:root:not([data-theme=dark]){--bg:#f6f6fb;--fg:#15151f;--mute:#5a5a70;--card:#ffffff;--line:#e2e2ee}}
+*{box-sizing:border-box}html,body{margin:0;background:var(--bg);color:var(--fg);font:16px/1.6 system-ui,-apple-system,"Segoe UI",Roboto,sans-serif}
+a{color:var(--a)}.wrap{max-width:1040px;margin:0 auto;padding:0 16px}
+header{padding:72px 0 28px}.tag{display:inline-block;font-size:13px;letter-spacing:.08em;text-transform:uppercase;color:var(--a);border:1px solid var(--line);border-radius:999px;padding:4px 12px}
+h1{font-size:clamp(40px,7vw,72px);line-height:1.05;margin:18px 0 10px;background:linear-gradient(90deg,var(--a),var(--b));-webkit-background-clip:text;background-clip:text;color:transparent}
+.lead{font-size:20px;color:var(--mute);max-width:760px}
+video{width:100%;border-radius:16px;border:1px solid var(--line);display:block;background:#000;margin:28px 0}
+.grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(280px,1fr));gap:14px;margin:24px 0 8px}
+.card{background:var(--card);border:1px solid var(--line);border-radius:14px;padding:18px}.card h3{margin:0 0 6px;font-size:17px}.card p{margin:0;color:var(--mute);font-size:15px}
+h2{margin:48px 0 8px}pre{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:14px;overflow:auto;font-size:14px}
+.btns{display:flex;flex-wrap:wrap;gap:10px;margin-top:22px}.btn{display:inline-block;padding:10px 18px;border-radius:10px;border:1px solid var(--line);text-decoration:none;color:var(--fg)}.btn.p{background:linear-gradient(90deg,var(--a),var(--b));color:#0b0b12;border:0;font-weight:600}
+footer{color:var(--mute);font-size:14px;padding:48px 0 64px;border-top:1px solid var(--line);margin-top:56px}
+.others a{margin-right:14px}
+</style></head>
+<body><div class="wrap">
+<header><span class="tag">Hyprland plugin · Pixel morph</span>
+<h1>hyprmorph</h1><p class="lead">Every window change is a swarm of pixels. A Hyprland plugin that turns window and workspace changes into a pixel morph, inspired by the page morph of a custom SteelSeries Arctis OLED daemon. Pixels break off, each with its own delay and arc, and fly into their new places.</p>
+<div class="btns"><a class="btn p" href="https://github.com/Guizzan/hyprmorph">Source on GitHub</a><a class="btn" href="#install">Install</a></div></header>
+<video src="demo.mp4" autoplay loop muted playsinline controls></video>
+<p style="color:var(--mute);font-size:14px;margin-top:-16px">Demo: opening and closing a window, switching workspaces, fullscreen, and two drags.</p>
+<h2>What it does</h2><div class="grid"><div class="card"><h3>Workspace switch</h3><p>The content of the old desktop flies, pixel by pixel, into the content of the new one. Pixels that are the same on both stay put; new content streams in from the side you switch toward.</p></div><div class="card"><h3>Open / close / resize / fullscreen</h3><p>Windows that change are rebuilt from their own pixels: each pixel flies from its spot in the old box to the same spot in the new one. Only pixels that actually changed move.</p></div><div class="card"><h3>Liquid-window drag</h3><p>Drag a window (SUPER + mouse) and it becomes a fixed-size blob made of its own pixels, still laid out like the window, with a wobbling outline, a liquid stretch along the movement and a short trail. Drop it and it flies back into place.</p></div><div class="card"><h3>Live destination</h3><p>The target picture is captured every frame, so moving content (video, terminals) keeps updating during the morph.</p></div></div>
+<h2 id="install">Install</h2>
+<p>Built and tested against <b>Hyprland 0.56</b> with the Lua config. Plugins are tied to the exact Hyprland version: rebuild after every Hyprland update.</p>
+<pre>git clone https://github.com/Guizzan/hyprmorph
+cd hyprmorph
+make            # builds hyprmorph-dev.so
+make install    # copies it to hyprmorph.so (new inode, safe while Hyprland runs)</pre>
+<p>Load it from your Lua config and turn off Hyprland's own window and workspace animations, which the plugin replaces:</p>
+<pre>pcall(hl.plugin.load, os.getenv("HOME") .. "/path/to/hyprmorph/hyprmorph.so")
+for _, leaf in ipairs({ "workspaces", "windowsIn", "windowsOut", "windowsMove", "fadeIn", "fadeOut" }) do
+    hl.animation({ leaf = leaf, enabled = false })
+end</pre>
+<p>Then log out and back in. Don't hot-swap the plugin in a running session (unloading it can crash Hyprland), and only run one of these effect plugins at a time.</p>
+<h2>Try it nested</h2><pre>Hyprland -c test/hyprland.lua</pre>
+<footer><div class="others">More effects: <a href="https://guizzan.github.io/hyprliquid/">hyprliquid — Liquid glass</a> <a href="https://guizzan.github.io/hyprhole/">hyprhole — Black hole</a></div><p>Made by <a href="https://github.com/Guizzan">Guizzan</a>.</p></footer>
+</div></body></html>
