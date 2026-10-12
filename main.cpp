@@ -61,6 +61,10 @@ namespace {
     constexpr double EDGE_LOGICAL  = 8.0;   // window boxes grown by this to take borders along
     constexpr int    BLOB_CELL_PX  = 3;     // particle size of a window being dragged (same pixels as the morph)
     constexpr float  BLOB_RAMP     = 0.25f; // pixels peel off over 1.5x this (staggered)
+    constexpr int    GLASS_DIV     = 4;     // morph glass height map: 1/4 resolution
+    constexpr float  GLASS_SPLAT   = 9.f;   // a flying pixel's bump, in pixel cells
+    constexpr float  GLASS_GAIN    = 0.10f; // how much one pixel raises the surface
+    constexpr float  GLASS_BEND    = 55.f;  // px of bend per unit slope
     constexpr double CHROMA_CELLS  = 4.0;   // widest red/blue split of a flying pixel, in pixel cells
     constexpr double BLOB_HALF     = 160.0;  // dragged window blob: half its longer side, logical px
     constexpr int    SAME_DIFF     = 6;     // a cell whose pixels all differ by at most this (of 255) did not change
@@ -77,7 +81,7 @@ namespace {
     };
 
     struct SMonitorState {
-        SP<Render::IFramebuffer> last, bg, neu, lowOld, lowNew, cells, diff, shown, lensSrc; // shown: last morph frame on screen
+        SP<Render::IFramebuffer> last, bg, neu, lowOld, lowNew, cells, diff, shown, lensSrc, height; // shown: last morph frame on screen
         bool                     morphing = false, paired = false, uploaded = false, maskUploaded = false, restart = false;
         Clock::time_point        start;
         std::vector<SInstance>   instances;
@@ -408,8 +412,85 @@ void main() {
 }
 )";
 
+    // Morph glass, 1/2: every flying pixel leaves a soft bump in a low-res
+    // height map (only while in flight), so the swarms become a liquid surface.
+    const char* SPLAT_VERT = R"(#version 300 es
+precision highp float;
+layout(location = 0) in vec2 corner;
+layout(location = 1) in vec2 src;
+layout(location = 2) in vec2 dst;
+layout(location = 3) in vec2 delayBow;
+uniform float t;
+uniform vec2  fbSize;
+uniform float cell;
+uniform float stagger;
+uniform float size;      // splat diameter, px
+out vec2  q;
+out float w;
+void main() {
+    float local = clamp((t - delayBow.x) / (1.0 - stagger), 0.0, 1.0);
+    float e = local < 0.5 ? 4.0 * local * local * local
+                          : 1.0 - pow(-2.0 * local + 2.0, 3.0) / 2.0;
+    vec2 d = dst - src;
+    vec2 n = vec2(-d.y, d.x);
+    vec2 p = src + d * e + n * abs(delayBow.y) * sin(3.14159265 * e) + 0.5 * cell;
+    w = sin(3.14159265 * local);
+    q = corner * 2.0 - 1.0;
+    vec2 px = p + q * 0.5 * size * (w > 0.001 ? 1.0 : 0.0);
+    gl_Position = vec4(px / fbSize * 2.0 - 1.0, 0.0, 1.0);
+}
+)";
+
+    const char* SPLAT_FRAG = R"(#version 300 es
+precision highp float;
+in vec2  q;
+in float w;
+uniform float gain;
+out vec4 frag;
+void main() {
+    float h = exp(-dot(q, q) * 3.0) * w * gain;
+    frag    = vec4(h, h, h, h);
+}
+)";
+
+    // Morph glass, 2/2: the finished morph frame seen through that surface:
+    // bent along its slopes (red and blue bend differently: rainbow edges), a
+    // thin-film shimmer on the slopes and highlights from the upper left.
+    const char* GLASS_FRAG = R"(#version 300 es
+precision highp float;
+uniform sampler2D scene;
+uniform sampler2D height;
+uniform vec2  fbSize;
+uniform vec2  texel;      // one height texel in uv
+uniform float strength;   // px of bend per unit slope
+out vec4 frag;
+void main() {
+    vec2  uv = gl_FragCoord.xy / fbSize;
+    float h  = texture(height, uv).r;
+    float hx = texture(height, uv + vec2(texel.x, 0.0)).r - texture(height, uv - vec2(texel.x, 0.0)).r;
+    float hy = texture(height, uv + vec2(0.0, texel.y)).r - texture(height, uv - vec2(0.0, texel.y)).r;
+    vec2  g  = vec2(hx, hy);
+    float sl = length(g);
+    if (h < 0.002 && sl < 0.002) {
+        frag = texture(scene, uv);
+        return;
+    }
+    vec2 off = -g * strength / fbSize;
+    vec3 col;
+    col.r = texture(scene, uv + off * 1.30).r;
+    col.g = texture(scene, uv + off).g;
+    col.b = texture(scene, uv + off * 0.70).b;
+    vec3  nrm  = normalize(vec3(-g * 6.0, 1.0));
+    float spec = pow(max(dot(nrm, normalize(vec3(-0.45, -0.6, 0.66))), 0.0), 24.0);
+    vec3  film = 0.5 + 0.5 * cos(6.2831853 * (h * 2.5 + sl * 4.0 + vec3(0.0, 0.33, 0.67)));
+    col += film * smoothstep(0.02, 0.25, sl) * 0.16 + vec3(spec) * 0.45 * smoothstep(0.0, 0.08, sl);
+    frag = vec4(col, 1.0);
+}
+)";
+
     struct SGL {
-        GLuint part = 0, base = 0, blob = 0, diff = 0, lens = 0, vao = 0, quad = 0;
+        GLuint part = 0, base = 0, blob = 0, diff = 0, lens = 0, splat = 0, glass = 0, vao = 0, quad = 0;
+        GLint  sT = -1, sFb = -1, sCell = -1, sStagger = -1, sSize = -1, sGain = -1, gScene = -1, gHeight = -1, gFb = -1, gTexel = -1, gStrength = -1;
         GLint  dOld = -1, dNew = -1, dCell = -1, dFb = -1;
         GLint  oTrail = -1, oTrailCount = -1, oHalf = -1, oBlock = -1, oBlockUv = -1;
         GLint  oOrigin = -1, oSnap = -1, oCursor = -1, oRadius = -1, oFb = -1, oCell = -1, oTime = -1, oAmount = -1, oTex = -1;
@@ -469,7 +550,9 @@ void main() {
         g_gl.blob = link(BLOB_VERT, BLOB_FRAG);
         g_gl.diff  = link(BASE_VERT, DIFF_FRAG);
         g_gl.lens  = link(BASE_VERT, LENS_FRAG);
-        if (!g_gl.part || !g_gl.base || !g_gl.blob || !g_gl.diff || !g_gl.lens) {
+        g_gl.splat = link(SPLAT_VERT, SPLAT_FRAG);
+        g_gl.glass = link(BASE_VERT, GLASS_FRAG);
+        if (!g_gl.part || !g_gl.base || !g_gl.blob || !g_gl.diff || !g_gl.lens || !g_gl.splat || !g_gl.glass) {
             g_gl.failed = true;
             return false;
         }
@@ -506,6 +589,17 @@ void main() {
         g_gl.lTime    = glGetUniformLocation(g_gl.lens, "time");
         g_gl.lAmt     = glGetUniformLocation(g_gl.lens, "amt");
         g_gl.lFb      = glGetUniformLocation(g_gl.lens, "fbSize");
+        g_gl.sT        = glGetUniformLocation(g_gl.splat, "t");
+        g_gl.sFb       = glGetUniformLocation(g_gl.splat, "fbSize");
+        g_gl.sCell     = glGetUniformLocation(g_gl.splat, "cell");
+        g_gl.sStagger  = glGetUniformLocation(g_gl.splat, "stagger");
+        g_gl.sSize     = glGetUniformLocation(g_gl.splat, "size");
+        g_gl.sGain     = glGetUniformLocation(g_gl.splat, "gain");
+        g_gl.gScene    = glGetUniformLocation(g_gl.glass, "scene");
+        g_gl.gHeight   = glGetUniformLocation(g_gl.glass, "height");
+        g_gl.gFb       = glGetUniformLocation(g_gl.glass, "fbSize");
+        g_gl.gTexel    = glGetUniformLocation(g_gl.glass, "texel");
+        g_gl.gStrength = glGetUniformLocation(g_gl.glass, "strength");
         g_gl.bOld     = glGetUniformLocation(g_gl.base, "oldTex");
         g_gl.bNew     = glGetUniformLocation(g_gl.base, "newTex");
         g_gl.bLowOld  = glGetUniformLocation(g_gl.base, "lowOld");
@@ -1041,6 +1135,54 @@ void main() {
             glUniform1i(g_gl.pNew, 1);
             glUniform1f(g_gl.pChroma, (float)(CHROMA_CELLS * CELL_PX));
             drawChannels(g_gl.pChannel, (GLsizei)st.instances.size());
+
+            // the flying swarms as liquid glass over the frame
+            const int HW = std::max(1, (int)target->m_size.x / GLASS_DIV), HH = std::max(1, (int)target->m_size.y / GLASS_DIV);
+            if (ensureFB(st.height, HW, HH, DRM_FORMAT_ABGR8888, "hyprmorph-height") && ensureFB(st.lensSrc, target, "hyprmorph-lens")) {
+                const auto HFB = fbID(st.height);
+                if (HFB) {
+                    GLint srcRgb = 0, dstRgb = 0, srcA = 0, dstA = 0;
+                    glGetIntegerv(GL_BLEND_SRC_RGB, &srcRgb);
+                    glGetIntegerv(GL_BLEND_DST_RGB, &dstRgb);
+                    glGetIntegerv(GL_BLEND_SRC_ALPHA, &srcA);
+                    glGetIntegerv(GL_BLEND_DST_ALPHA, &dstA);
+                    glBindFramebuffer(GL_FRAMEBUFFER, *HFB);
+                    glViewport(0, 0, HW, HH);
+                    glClearColor(0, 0, 0, 0);
+                    glClear(GL_COLOR_BUFFER_BIT);
+                    glEnable(GL_BLEND);
+                    glBlendFunc(GL_ONE, GL_ONE);
+                    glUseProgram(g_gl.splat);
+                    glUniform1f(g_gl.sT, t);
+                    glUniform2f(g_gl.sFb, (float)target->m_size.x, (float)target->m_size.y);
+                    glUniform1f(g_gl.sCell, (float)CELL_PX);
+                    glUniform1f(g_gl.sStagger, STAGGER);
+                    glUniform1f(g_gl.sSize, GLASS_SPLAT * CELL_PX);
+                    glUniform1f(g_gl.sGain, GLASS_GAIN);
+                    glDrawArraysInstanced(GL_TRIANGLE_STRIP, 0, 4, (GLsizei)st.instances.size());
+                    glDisable(GL_BLEND);
+                    glBlendFuncSeparate(srcRgb, dstRgb, srcA, dstA);
+
+                    blit(target, st.lensSrc); // (keeps our framebuffer binding)
+                    glBindFramebuffer(GL_FRAMEBUFFER, *TARGET);
+                    glViewport(0, 0, (GLsizei)target->m_size.x, (GLsizei)target->m_size.y);
+                    glUseProgram(g_gl.glass);
+                    glActiveTexture(GL_TEXTURE0);
+                    st.lensSrc->getTexture()->bind();
+                    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+                    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+                    glActiveTexture(GL_TEXTURE1);
+                    st.height->getTexture()->bind();
+                    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+                    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+                    glUniform1i(g_gl.gScene, 0);
+                    glUniform1i(g_gl.gHeight, 1);
+                    glUniform2f(g_gl.gFb, (float)target->m_size.x, (float)target->m_size.y);
+                    glUniform2f(g_gl.gTexel, 1.f / HW, 1.f / HH);
+                    glUniform1f(g_gl.gStrength, GLASS_BEND * (float)target->m_size.y / 1440.f);
+                    glDrawArrays(GL_TRIANGLES, 0, 3);
+                }
+            }
             for (GLuint a = 1; a <= 3; ++a) {
                 glVertexAttribDivisor(a, 0);
                 glDisableVertexAttribArray(a);
@@ -1655,6 +1797,10 @@ APICALL EXPORT void PLUGIN_EXIT() {
         glDeleteProgram(g_gl.diff);
     if (g_gl.lens)
         glDeleteProgram(g_gl.lens);
+    if (g_gl.splat)
+        glDeleteProgram(g_gl.splat);
+    if (g_gl.glass)
+        glDeleteProgram(g_gl.glass);
     if (g_gl.vao)
         glDeleteVertexArrays(1, &g_gl.vao);
     if (g_gl.quad)
