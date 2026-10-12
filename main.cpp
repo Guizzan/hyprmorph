@@ -61,11 +61,6 @@ namespace {
     constexpr double EDGE_LOGICAL  = 8.0;   // window boxes grown by this to take borders along
     constexpr int    BLOB_CELL_PX  = 3;     // particle size of a window being dragged (same pixels as the morph)
     constexpr float  BLOB_RAMP     = 0.25f; // pixels peel off over 1.5x this (staggered)
-    constexpr int    GLASS_DIV     = 4;     // morph glass height map: 1/4 resolution
-    constexpr float  GLASS_SPLAT   = 9.f;   // a flying pixel's bump, in pixel cells
-    constexpr float  GLASS_GAIN    = 0.10f; // how much one pixel raises the surface
-    constexpr float  GLASS_BEND    = 55.f;  // px of bend per unit slope
-    constexpr double CHROMA_CELLS  = 4.0;   // widest red/blue split of a flying pixel, in pixel cells
     constexpr double BLOB_HALF     = 160.0;  // dragged window blob: half its longer side, logical px
     constexpr int    SAME_DIFF     = 6;     // a cell whose pixels all differ by at most this (of 255) did not change
 
@@ -81,7 +76,7 @@ namespace {
     };
 
     struct SMonitorState {
-        SP<Render::IFramebuffer> last, bg, neu, lowOld, lowNew, cells, diff, shown, lensSrc, height; // shown: last morph frame on screen
+        SP<Render::IFramebuffer> last, bg, neu, lowOld, lowNew, cells, diff, shown; // shown: last morph frame on screen
         bool                     morphing = false, paired = false, uploaded = false, maskUploaded = false, restart = false;
         Clock::time_point        start;
         std::vector<SInstance>   instances;
@@ -136,8 +131,6 @@ uniform float t;
 uniform vec2  fbSize;
 uniform float cell;
 uniform float stagger;
-uniform float channel;   // -1 / 0 / +1: blue, green, red copy (drawn one colour channel at a time)
-uniform float chroma;    // strongest channel split, px
 out vec2  uvOld;
 out vec2  uvNew;
 out float mixAmt;
@@ -148,12 +141,6 @@ void main() {
     vec2 d = dst - src;
     vec2 n = vec2(-d.y, d.x);
     vec2 p = src + d * e + n * abs(delayBow.y) * sin(3.14159265 * e);
-    // dispersion: in flight a pixel splits into red, green and blue along its
-    // path, like light through a prism, and comes back together as it lands
-    vec2  v      = d + n * abs(delayBow.y) * 3.14159265 * cos(3.14159265 * e);
-    float flight = sin(3.14159265 * local);
-    if (length(v) > 0.001)
-        p += normalize(v) * channel * flight * min(chroma, length(d) * 0.06);
     p = floor(p / cell + 0.5) * cell;                                  // land on the pixel grid, like the deck
     vec2 px = p + corner * cell;
     gl_Position = vec4(px / fbSize * 2.0 - 1.0, 0.0, 1.0);
@@ -276,7 +263,6 @@ uniform vec2  fbSize;
 uniform float cell;
 uniform float time;
 uniform float amount;       // 0..1.5 since the drag began (pixels peel off staggered)
-uniform float channel;      // -1 / 0 / +1: blue, green, red copy
 flat out vec2 uvC;
 void main() {
     vec2  c   = rel + 0.5 * block;
@@ -323,18 +309,8 @@ void main() {
     float k  = clamp((amount - d) / 0.5, 0.0, 1.0);
     k        = k * k * (3.0 - 2.0 * k);
     float sz = mix(max(block, cell), cell, k);
-    vec2  ring = at + off - 0.5 * cell;
-    vec2  p    = mix(startOrigin + rel, ring, k);
-    // dispersion: the rim splits into a rainbow like the edge of a lens, the
-    // whole drop smears red/blue along a fast movement, peeling pixels flare
-    vec2  disp = dir * cell * (0.6 + 2.6 * edge) * (0.75 + 0.25 * sin(time * 1.9 + a * 2.0));
-    if (speed > 1.0)
-        disp += (vel / speed) * min(speed * 0.10, 6.0 * cell);
-    vec2  fly  = ring - (startOrigin + rel);
-    if (length(fly) > 0.001)
-        disp += normalize(fly) * 5.0 * cell * sin(3.14159265 * k);
-    p         += disp * channel;
-    p          = floor(p / cell + 0.5) * cell;
+    vec2  p  = mix(startOrigin + rel, at + off - 0.5 * cell, k);
+    p        = floor(p / cell + 0.5) * cell;
     gl_Position = vec4((p + corner * sz) / fbSize * 2.0 - 1.0, 0.0, 1.0);
     uvC         = c / snapSize;
 }
@@ -356,146 +332,12 @@ void main() {
 }
 )";
 
-    // Under the blob: it is a drop of glass. What lies behind it is magnified
-    // and bent toward it, with red and blue bending by different amounts at
-    // the rim (dispersion), a slow liquid ripple, a thin iridescent film on the
-    // outline and a highlight from the upper left.
-    const char* LENS_FRAG = R"(#version 300 es
-precision highp float;
-uniform sampler2D scene;     // the screen without the blob
-uniform vec2  center;        // GL px
-uniform vec2  halfSize;
-uniform vec2  vel;           // recent cursor movement, px
-uniform vec2  fbSize;
-uniform float time;
-uniform float amt;           // 0..1 fade in
-out vec4 frag;
-void main() {
-    vec2  px = gl_FragCoord.xy;
-    vec2  d  = px - center;
-    vec2  e  = d;
-    float speed = length(vel);
-    if (speed > 1.0) { // the same liquid stretch as the blob
-        vec2  dirV    = vel / speed;
-        vec2  perp    = vec2(-dirV.y, dirV.x);
-        float stretch = 1.0 + min(speed / max(max(halfSize.x, halfSize.y), 1.0), 1.5) * 0.5;
-        e             = dirV * dot(d, dirV) / stretch + perp * dot(d, perp) * sqrt(stretch);
-    }
-    vec2  en    = e / (halfSize * 1.04);
-    float r     = length(en);
-    float a     = atan(en.y, en.x);
-    float shape = 1.0 + 0.10 * sin(3.0 * a + time * 1.3) + 0.07 * sin(5.0 * a - time * 2.1)
-                      + 0.05 * sin(2.0 * a + time * 0.7 + 1.7);
-    float rn    = r / shape;
-    const float OUTER = 1.6;
-    if (rn > OUTER)
-        discard;
-    float band = rn < 1.0 ? 1.0 : 1.0 - smoothstep(1.0, OUTER, rn);
-    band      *= band;
-    float ripple = 1.0 + 0.035 * sin(rn * 22.0 - time * 5.0) * band;
-    float bend   = 0.42 * band * amt;
-    float spread = 0.16 * amt;
-    vec3  col;
-    col.r = texture(scene, (center + d * ripple * (1.0 - bend * (1.0 + spread))) / fbSize).r;
-    col.g = texture(scene, (center + d * ripple * (1.0 - bend)) / fbSize).g;
-    col.b = texture(scene, (center + d * ripple * (1.0 - bend * (1.0 - spread))) / fbSize).b;
-    // depth: the glass darkens slightly toward its edge, brightens at the rim
-    col *= 1.0 - 0.10 * band * smoothstep(0.6, 1.0, rn) * amt;
-    float rim  = exp(-pow((rn - 1.02) / 0.06, 2.0)) * amt;
-    vec2  nrm  = normalize(d + vec2(1e-4));
-    float spec = pow(max(dot(nrm, normalize(vec2(-0.55, -0.85))), 0.0), 6.0);
-    vec3  film = 0.5 + 0.5 * cos(6.2831853 * (rn * 2.5 + a / 3.14159265 + time * 0.2 + vec3(0.0, 0.33, 0.67)));
-    col += film * rim * 0.22 + vec3(1.0) * rim * spec * 0.55;
-    // a soft caustic: light focused just outside the rim on the far side
-    col += vec3(1.0) * 0.10 * amt * exp(-pow((rn - 1.18) / 0.08, 2.0)) * pow(max(dot(nrm, normalize(vec2(0.55, 0.85))), 0.0), 3.0);
-    frag = vec4(col, 1.0);
-}
-)";
-
-    // Morph glass, 1/2: every flying pixel leaves a soft bump in a low-res
-    // height map (only while in flight), so the swarms become a liquid surface.
-    const char* SPLAT_VERT = R"(#version 300 es
-precision highp float;
-layout(location = 0) in vec2 corner;
-layout(location = 1) in vec2 src;
-layout(location = 2) in vec2 dst;
-layout(location = 3) in vec2 delayBow;
-uniform float t;
-uniform vec2  fbSize;
-uniform float cell;
-uniform float stagger;
-uniform float size;      // splat diameter, px
-out vec2  q;
-out float w;
-void main() {
-    float local = clamp((t - delayBow.x) / (1.0 - stagger), 0.0, 1.0);
-    float e = local < 0.5 ? 4.0 * local * local * local
-                          : 1.0 - pow(-2.0 * local + 2.0, 3.0) / 2.0;
-    vec2 d = dst - src;
-    vec2 n = vec2(-d.y, d.x);
-    vec2 p = src + d * e + n * abs(delayBow.y) * sin(3.14159265 * e) + 0.5 * cell;
-    w = sin(3.14159265 * local);
-    q = corner * 2.0 - 1.0;
-    vec2 px = p + q * 0.5 * size * (w > 0.001 ? 1.0 : 0.0);
-    gl_Position = vec4(px / fbSize * 2.0 - 1.0, 0.0, 1.0);
-}
-)";
-
-    const char* SPLAT_FRAG = R"(#version 300 es
-precision highp float;
-in vec2  q;
-in float w;
-uniform float gain;
-out vec4 frag;
-void main() {
-    float h = exp(-dot(q, q) * 3.0) * w * gain;
-    frag    = vec4(h, h, h, h);
-}
-)";
-
-    // Morph glass, 2/2: the finished morph frame seen through that surface:
-    // bent along its slopes (red and blue bend differently: rainbow edges), a
-    // thin-film shimmer on the slopes and highlights from the upper left.
-    const char* GLASS_FRAG = R"(#version 300 es
-precision highp float;
-uniform sampler2D scene;
-uniform sampler2D height;
-uniform vec2  fbSize;
-uniform vec2  texel;      // one height texel in uv
-uniform float strength;   // px of bend per unit slope
-out vec4 frag;
-void main() {
-    vec2  uv = gl_FragCoord.xy / fbSize;
-    float h  = texture(height, uv).r;
-    float hx = texture(height, uv + vec2(texel.x, 0.0)).r - texture(height, uv - vec2(texel.x, 0.0)).r;
-    float hy = texture(height, uv + vec2(0.0, texel.y)).r - texture(height, uv - vec2(0.0, texel.y)).r;
-    vec2  g  = vec2(hx, hy);
-    float sl = length(g);
-    if (h < 0.002 && sl < 0.002) {
-        frag = texture(scene, uv);
-        return;
-    }
-    vec2 off = -g * strength / fbSize;
-    vec3 col;
-    col.r = texture(scene, uv + off * 1.30).r;
-    col.g = texture(scene, uv + off).g;
-    col.b = texture(scene, uv + off * 0.70).b;
-    vec3  nrm  = normalize(vec3(-g * 6.0, 1.0));
-    float spec = pow(max(dot(nrm, normalize(vec3(-0.45, -0.6, 0.66))), 0.0), 24.0);
-    vec3  film = 0.5 + 0.5 * cos(6.2831853 * (h * 2.5 + sl * 4.0 + vec3(0.0, 0.33, 0.67)));
-    col += film * smoothstep(0.02, 0.25, sl) * 0.16 + vec3(spec) * 0.45 * smoothstep(0.0, 0.08, sl);
-    frag = vec4(col, 1.0);
-}
-)";
-
     struct SGL {
-        GLuint part = 0, base = 0, blob = 0, diff = 0, lens = 0, splat = 0, glass = 0, vao = 0, quad = 0;
-        GLint  sT = -1, sFb = -1, sCell = -1, sStagger = -1, sSize = -1, sGain = -1, gScene = -1, gHeight = -1, gFb = -1, gTexel = -1, gStrength = -1;
+        GLuint part = 0, base = 0, blob = 0, diff = 0, vao = 0, quad = 0;
         GLint  dOld = -1, dNew = -1, dCell = -1, dFb = -1;
         GLint  oTrail = -1, oTrailCount = -1, oHalf = -1, oBlock = -1, oBlockUv = -1;
         GLint  oOrigin = -1, oSnap = -1, oCursor = -1, oRadius = -1, oFb = -1, oCell = -1, oTime = -1, oAmount = -1, oTex = -1;
-        GLint  pT = -1, pFb = -1, pCell = -1, pStagger = -1, pOld = -1, pNew = -1, pChannel = -1, pChroma = -1;
-        GLint  oChannel = -1, lScene = -1, lCenter = -1, lHalf = -1, lVel = -1, lTime = -1, lAmt = -1, lFb = -1;
+        GLint  pT = -1, pFb = -1, pCell = -1, pStagger = -1, pOld = -1, pNew = -1;
         GLint  bOld = -1, bNew = -1, bLowOld = -1, bLowNew = -1, bMask = -1, bBg = -1, bFb = -1, bCell = -1, bFade = -1, bT = -1;
         bool   failed = false;
     } g_gl;
@@ -549,10 +391,7 @@ void main() {
         g_gl.base = link(BASE_VERT, BASE_FRAG);
         g_gl.blob = link(BLOB_VERT, BLOB_FRAG);
         g_gl.diff  = link(BASE_VERT, DIFF_FRAG);
-        g_gl.lens  = link(BASE_VERT, LENS_FRAG);
-        g_gl.splat = link(SPLAT_VERT, SPLAT_FRAG);
-        g_gl.glass = link(BASE_VERT, GLASS_FRAG);
-        if (!g_gl.part || !g_gl.base || !g_gl.blob || !g_gl.diff || !g_gl.lens || !g_gl.splat || !g_gl.glass) {
+        if (!g_gl.part || !g_gl.base || !g_gl.blob || !g_gl.diff) {
             g_gl.failed = true;
             return false;
         }
@@ -579,27 +418,6 @@ void main() {
         g_gl.pStagger = glGetUniformLocation(g_gl.part, "stagger");
         g_gl.pOld     = glGetUniformLocation(g_gl.part, "oldTex");
         g_gl.pNew     = glGetUniformLocation(g_gl.part, "newTex");
-        g_gl.pChannel = glGetUniformLocation(g_gl.part, "channel");
-        g_gl.pChroma  = glGetUniformLocation(g_gl.part, "chroma");
-        g_gl.oChannel = glGetUniformLocation(g_gl.blob, "channel");
-        g_gl.lScene   = glGetUniformLocation(g_gl.lens, "scene");
-        g_gl.lCenter  = glGetUniformLocation(g_gl.lens, "center");
-        g_gl.lHalf    = glGetUniformLocation(g_gl.lens, "halfSize");
-        g_gl.lVel     = glGetUniformLocation(g_gl.lens, "vel");
-        g_gl.lTime    = glGetUniformLocation(g_gl.lens, "time");
-        g_gl.lAmt     = glGetUniformLocation(g_gl.lens, "amt");
-        g_gl.lFb      = glGetUniformLocation(g_gl.lens, "fbSize");
-        g_gl.sT        = glGetUniformLocation(g_gl.splat, "t");
-        g_gl.sFb       = glGetUniformLocation(g_gl.splat, "fbSize");
-        g_gl.sCell     = glGetUniformLocation(g_gl.splat, "cell");
-        g_gl.sStagger  = glGetUniformLocation(g_gl.splat, "stagger");
-        g_gl.sSize     = glGetUniformLocation(g_gl.splat, "size");
-        g_gl.sGain     = glGetUniformLocation(g_gl.splat, "gain");
-        g_gl.gScene    = glGetUniformLocation(g_gl.glass, "scene");
-        g_gl.gHeight   = glGetUniformLocation(g_gl.glass, "height");
-        g_gl.gFb       = glGetUniformLocation(g_gl.glass, "fbSize");
-        g_gl.gTexel    = glGetUniformLocation(g_gl.glass, "texel");
-        g_gl.gStrength = glGetUniformLocation(g_gl.glass, "strength");
         g_gl.bOld     = glGetUniformLocation(g_gl.base, "oldTex");
         g_gl.bNew     = glGetUniformLocation(g_gl.base, "newTex");
         g_gl.bLowOld  = glGetUniformLocation(g_gl.base, "lowOld");
@@ -751,21 +569,6 @@ void main() {
         for (size_t i = 0; i < out.size(); ++i)
             out[i] = rgba[i * 4] > SAME_DIFF;
         return out;
-    }
-
-    // Draw the instances three times, each time writing one colour channel with
-    // that channel's offset (-1 blue, 0 green, +1 red): where the copies line up
-    // the colour is exact, where they split the edges fringe like a prism.
-    void drawChannels(GLint channelLoc, GLsizei count) {
-        GLboolean mask[4];
-        glGetBooleanv(GL_COLOR_WRITEMASK, mask);
-        const float OFF[3] = {1.f, 0.f, -1.f};
-        for (int c = 0; c < 3; ++c) {
-            glColorMask(c == 0, c == 1, c == 2, GL_FALSE);
-            glUniform1f(channelLoc, OFF[c]);
-            glDrawArraysInstanced(GL_TRIANGLE_STRIP, 0, 4, count);
-        }
-        glColorMask(mask[0], mask[1], mask[2], mask[3]);
     }
 
     // --------------------------------------------------------- the morph ---
@@ -1133,56 +936,7 @@ void main() {
             glUniform1f(g_gl.pStagger, STAGGER);
             glUniform1i(g_gl.pOld, 0);
             glUniform1i(g_gl.pNew, 1);
-            glUniform1f(g_gl.pChroma, (float)(CHROMA_CELLS * CELL_PX));
-            drawChannels(g_gl.pChannel, (GLsizei)st.instances.size());
-
-            // the flying swarms as liquid glass over the frame
-            const int HW = std::max(1, (int)target->m_size.x / GLASS_DIV), HH = std::max(1, (int)target->m_size.y / GLASS_DIV);
-            if (ensureFB(st.height, HW, HH, DRM_FORMAT_ABGR8888, "hyprmorph-height") && ensureFB(st.lensSrc, target, "hyprmorph-lens")) {
-                const auto HFB = fbID(st.height);
-                if (HFB) {
-                    GLint srcRgb = 0, dstRgb = 0, srcA = 0, dstA = 0;
-                    glGetIntegerv(GL_BLEND_SRC_RGB, &srcRgb);
-                    glGetIntegerv(GL_BLEND_DST_RGB, &dstRgb);
-                    glGetIntegerv(GL_BLEND_SRC_ALPHA, &srcA);
-                    glGetIntegerv(GL_BLEND_DST_ALPHA, &dstA);
-                    glBindFramebuffer(GL_FRAMEBUFFER, *HFB);
-                    glViewport(0, 0, HW, HH);
-                    glClearColor(0, 0, 0, 0);
-                    glClear(GL_COLOR_BUFFER_BIT);
-                    glEnable(GL_BLEND);
-                    glBlendFunc(GL_ONE, GL_ONE);
-                    glUseProgram(g_gl.splat);
-                    glUniform1f(g_gl.sT, t);
-                    glUniform2f(g_gl.sFb, (float)target->m_size.x, (float)target->m_size.y);
-                    glUniform1f(g_gl.sCell, (float)CELL_PX);
-                    glUniform1f(g_gl.sStagger, STAGGER);
-                    glUniform1f(g_gl.sSize, GLASS_SPLAT * CELL_PX);
-                    glUniform1f(g_gl.sGain, GLASS_GAIN);
-                    glDrawArraysInstanced(GL_TRIANGLE_STRIP, 0, 4, (GLsizei)st.instances.size());
-                    glDisable(GL_BLEND);
-                    glBlendFuncSeparate(srcRgb, dstRgb, srcA, dstA);
-
-                    blit(target, st.lensSrc); // (keeps our framebuffer binding)
-                    glBindFramebuffer(GL_FRAMEBUFFER, *TARGET);
-                    glViewport(0, 0, (GLsizei)target->m_size.x, (GLsizei)target->m_size.y);
-                    glUseProgram(g_gl.glass);
-                    glActiveTexture(GL_TEXTURE0);
-                    st.lensSrc->getTexture()->bind();
-                    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
-                    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
-                    glActiveTexture(GL_TEXTURE1);
-                    st.height->getTexture()->bind();
-                    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
-                    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
-                    glUniform1i(g_gl.gScene, 0);
-                    glUniform1i(g_gl.gHeight, 1);
-                    glUniform2f(g_gl.gFb, (float)target->m_size.x, (float)target->m_size.y);
-                    glUniform2f(g_gl.gTexel, 1.f / HW, 1.f / HH);
-                    glUniform1f(g_gl.gStrength, GLASS_BEND * (float)target->m_size.y / 1440.f);
-                    glDrawArrays(GL_TRIANGLES, 0, 3);
-                }
-            }
+            glDrawArraysInstanced(GL_TRIANGLE_STRIP, 0, 4, (GLsizei)st.instances.size());
             for (GLuint a = 1; a <= 3; ++a) {
                 glVertexAttribDivisor(a, 0);
                 glDisableVertexAttribArray(a);
@@ -1277,10 +1031,6 @@ void main() {
         const auto TARGET = fbID(target);
         if (!TARGET)
             return;
-        // the screen as it is without the blob, for the glass to bend
-        const bool LENS = ensureFB(st.lensSrc, target, "hyprmorph-lens");
-        if (LENS)
-            blit(target, st.lensSrc);
         // cursor in GL px
         const Vector2D CUR = Pointer::mgr()->position();
         const float    CXP = (float)((CUR.x - mon->m_position.x) * mon->m_scale), CYP = (float)((CUR.y - mon->m_position.y) * mon->m_scale);
@@ -1303,32 +1053,6 @@ void main() {
         glBindVertexArray(g_gl.vao);
 
         const float SECS = std::chrono::duration<float>(Clock::now() - st.dragStart).count();
-
-        if (LENS && st.trail.size() >= 2) {
-            const size_t   V  = std::min<size_t>(6, st.trail.size() / 2 - 1);
-            const float    VX = st.trail[0] - st.trail[V * 2], VY = st.trail[1] - st.trail[V * 2 + 1];
-            const float    EXT = (float)std::max(st.blobHalf.x, st.blobHalf.y) * 2.6f + std::hypot(VX, VY);
-            const float    LA  = std::clamp((SECS / BLOB_RAMP - 0.3f) / 0.9f, 0.f, 1.f);
-            glUseProgram(g_gl.lens);
-            glActiveTexture(GL_TEXTURE0);
-            st.lensSrc->getTexture()->bind();
-            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
-            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
-            glUniform1i(g_gl.lScene, 0);
-            glUniform2f(g_gl.lCenter, CXP, CYP);
-            glUniform2f(g_gl.lHalf, (float)st.blobHalf.x, (float)st.blobHalf.y);
-            glUniform2f(g_gl.lVel, VX, VY);
-            glUniform2f(g_gl.lFb, (float)target->m_size.x, (float)target->m_size.y);
-            glUniform1f(g_gl.lTime, SECS);
-            glUniform1f(g_gl.lAmt, LA);
-            GLint box[4];
-            glGetIntegerv(GL_SCISSOR_BOX, box);
-            glEnable(GL_SCISSOR_TEST);
-            glScissor((GLint)(CXP - EXT), (GLint)(CYP - EXT), (GLsizei)(2 * EXT), (GLsizei)(2 * EXT));
-            glDrawArrays(GL_TRIANGLES, 0, 3);
-            glDisable(GL_SCISSOR_TEST);
-            glScissor(box[0], box[1], box[2], box[3]);
-        }
 
         if (!st.blobVbo)
             glGenBuffers(1, &st.blobVbo);
@@ -1375,7 +1099,7 @@ void main() {
         glGetTexParameteriv(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, &magF);
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
-        drawChannels(g_gl.oChannel, (GLsizei)(st.blobCells.size() / 6));
+        glDrawArraysInstanced(GL_TRIANGLE_STRIP, 0, 4, (GLsizei)(st.blobCells.size() / 6));
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, minF);
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, magF);
         glVertexAttribDivisor(1, 0);
@@ -1795,12 +1519,6 @@ APICALL EXPORT void PLUGIN_EXIT() {
         glDeleteProgram(g_gl.blob);
     if (g_gl.diff)
         glDeleteProgram(g_gl.diff);
-    if (g_gl.lens)
-        glDeleteProgram(g_gl.lens);
-    if (g_gl.splat)
-        glDeleteProgram(g_gl.splat);
-    if (g_gl.glass)
-        glDeleteProgram(g_gl.glass);
     if (g_gl.vao)
         glDeleteVertexArrays(1, &g_gl.vao);
     if (g_gl.quad)
