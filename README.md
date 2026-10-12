@@ -38,4 +38,4 @@ Try it in a nested session first: `Hyprland -c test/hyprland.lua`.
 
 ## See also
 
-[hyprliquid](https://github.com/Guizzan/hyprliquid) (liquid glass) · [hyprhole](https://github.com/Guizzan/hyprhole) (black hole)
+[hyprliquid](https://github.com/Guizzan/hyprliquid) (liquid) · [hyprhole](https://github.com/Guizzan/hyprhole) (black hole)
