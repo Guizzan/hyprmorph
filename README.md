@@ -4,7 +4,7 @@ Every window change is a swarm of pixels. A Hyprland plugin that turns window an
 
 **Demo and details: https://guizzan.github.io/hyprmorph/**
 
-https://github.com/Guizzan/hyprmorph/raw/master/docs/demo.mp4
+[![hyprmorph demo](docs/demo.gif)](https://guizzan.github.io/hyprmorph/)
 
 ## What it does
 
