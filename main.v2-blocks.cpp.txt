@@ -1,0 +1,603 @@
+// hyprmorph — the arctis-hub OLED page morph, for Hyprland workspaces.
+//
+// On a workspace switch the old workspace's windows break into tiles that fly
+// to the new workspace's windows and reassemble there, blending from the old
+// picture to the new one on the way. As on the deck (arctishub/oled.py Morph):
+//   * only what differs moves: tiles covered by windows on both workspaces
+//     stay in place and just cross-fade, the wallpaper/bar/dock are untouched;
+//   * old and new tiles are each ordered along a Hilbert curve and paired in
+//     that order, so a run of one window lands on a nearby run of the next;
+//     the smaller side is resampled, tiles split or merge on the way;
+//   * every tile has its own take-off delay (stagger) and a sideways bow,
+//     eased in-out cubic;
+//   * the destination is live: the new workspace is re-captured every frame.
+//
+// Rendering: every frame the windows are composited normally; at
+// RENDER_POST_WINDOWS the frame is copied to `last` (the picture to morph
+// from). During a morph that copy goes to `neu` instead, the frame is reset to
+// the background copied at RENDER_PRE_WINDOWS, and the tiles are drawn on top,
+// sampling `last` (frozen) and `neu`. Hyprland's own workspace animation must
+// be disabled so the switch itself is instant.
+
+#include <hyprland/src/plugins/PluginAPI.hpp>
+#include <hyprland/src/event/EventBus.hpp>
+#include <hyprland/src/desktop/state/WindowState.hpp>
+#include <hyprland/src/desktop/view/Window.hpp>
+#include <hyprland/src/desktop/Workspace.hpp>
+#include <hyprland/src/output/Monitor.hpp>
+#include <hyprland/src/state/MonitorState.hpp>
+#include <hyprland/src/render/Renderer.hpp>
+#include <hyprland/src/render/OpenGL.hpp>
+#include <hyprland/src/render/pass/PassElement.hpp>
+#include <hyprland/src/render/gl/GLFramebuffer.hpp>
+#include <hyprland/src/helpers/math/Math.hpp>
+
+#include <GLES3/gl32.h>
+#include <algorithm>
+#include <chrono>
+#include <cmath>
+#include <random>
+#include <unordered_map>
+#include <vector>
+
+static HANDLE PHANDLE = nullptr; // not inline: a GNU-unique symbol would pin the .so on unload
+
+namespace {
+    constexpr float  MORPH_SECONDS = 0.6f;
+    constexpr float  STAGGER       = 0.35f; // fraction of the run over which tiles set off
+    constexpr float  CURL          = 0.18f; // sideways bow of each flight path, per pixel travelled
+    constexpr double TILE_LOGICAL     = 14.0; // tile edge in logical px
+    constexpr int    CHANGE_THRESHOLD = 18;   // per-channel difference (0-255) for a tile to count as changed
+    constexpr float  LUMA_BANDS       = 6.f;  // brightness bands tiles are matched within
+
+    using Clock = std::chrono::steady_clock;
+
+    struct SInstance {
+        float srcX, srcY, dstX, dstY, delay, bow;
+    };
+
+    struct SMonitorState {
+        SP<Render::IFramebuffer> last, bg, neu;
+        bool                     morphing = false;
+        Clock::time_point        start;
+        std::vector<SInstance>   instances;
+        bool                     uploaded = false;
+        GLuint                   vbo      = 0;
+        float                    tile     = 16.f;
+        bool                     paired   = false; // tiles are paired on the first frame of a morph
+        SP<Render::IFramebuffer> smallOld, smallNew;
+        PHLWORKSPACEREF          lastWorkspace;
+    };
+
+    std::unordered_map<MONITORID, SMonitorState> g_mon;
+    std::vector<CHyprSignalListener>            g_listeners;
+
+    // ---------------------------------------------------------------- GL ---
+
+    struct SGL {
+        GLuint program = 0, vao = 0, quad = 0;
+        GLint  uT = -1, uFb = -1, uTile = -1, uStagger = -1, uOld = -1, uNew = -1;
+        bool   failed = false;
+    } g_gl;
+
+    const char* VERT = R"(#version 300 es
+precision highp float;
+layout(location = 0) in vec2 corner;
+layout(location = 1) in vec2 src;
+layout(location = 2) in vec2 dst;
+layout(location = 3) in vec2 delayBow;
+uniform float t;
+uniform vec2  fbSize;
+uniform float tile;
+uniform float stagger;
+out vec2  uvOld;
+out vec2  uvNew;
+out float mixAmt;
+void main() {
+    float local = clamp((t - delayBow.x) / (1.0 - stagger), 0.0, 1.0);
+    float e = local < 0.5 ? 4.0 * local * local * local
+                          : 1.0 - pow(-2.0 * local + 2.0, 3.0) / 2.0;
+    vec2 d = dst - src;
+    vec2 n = vec2(-d.y, d.x);
+    vec2 p = src + d * e + n * delayBow.y * sin(3.14159265 * e);
+    vec2 px = p + corner * tile;
+    gl_Position = vec4(px / fbSize * 2.0 - 1.0, 0.0, 1.0);
+    uvOld  = (src + corner * tile) / fbSize;
+    uvNew  = (dst + corner * tile) / fbSize;
+    mixAmt = e;
+}
+)";
+
+    const char* FRAG = R"(#version 300 es
+precision highp float;
+in vec2  uvOld;
+in vec2  uvNew;
+in float mixAmt;
+uniform sampler2D oldTex;
+uniform sampler2D newTex;
+out vec4 frag;
+void main() {
+    frag = mix(texture(oldTex, uvOld), texture(newTex, uvNew), mixAmt);
+}
+)";
+
+    GLuint compile(GLenum type, const char* src) {
+        GLuint s = glCreateShader(type);
+        glShaderSource(s, 1, &src, nullptr);
+        glCompileShader(s);
+        GLint ok = 0;
+        glGetShaderiv(s, GL_COMPILE_STATUS, &ok);
+        if (!ok) {
+            char log[1024] = {};
+            glGetShaderInfoLog(s, sizeof(log), nullptr, log);
+            HyprlandAPI::addNotification(PHANDLE, std::string("[hyprmorph] shader: ") + log, CHyprColor{1, 0.2, 0.2, 1}, 8000);
+            glDeleteShader(s);
+            return 0;
+        }
+        return s;
+    }
+
+    bool ensureGL() {
+        if (g_gl.program)
+            return true;
+        if (g_gl.failed)
+            return false;
+        GLuint vs = compile(GL_VERTEX_SHADER, VERT), fs = compile(GL_FRAGMENT_SHADER, FRAG);
+        if (!vs || !fs) {
+            g_gl.failed = true;
+            return false;
+        }
+        g_gl.program = glCreateProgram();
+        glAttachShader(g_gl.program, vs);
+        glAttachShader(g_gl.program, fs);
+        glLinkProgram(g_gl.program);
+        glDeleteShader(vs);
+        glDeleteShader(fs);
+        GLint ok = 0;
+        glGetProgramiv(g_gl.program, GL_LINK_STATUS, &ok);
+        if (!ok) {
+            glDeleteProgram(g_gl.program);
+            g_gl.program = 0;
+            g_gl.failed  = true;
+            return false;
+        }
+        g_gl.uT       = glGetUniformLocation(g_gl.program, "t");
+        g_gl.uFb      = glGetUniformLocation(g_gl.program, "fbSize");
+        g_gl.uTile    = glGetUniformLocation(g_gl.program, "tile");
+        g_gl.uStagger = glGetUniformLocation(g_gl.program, "stagger");
+        g_gl.uOld     = glGetUniformLocation(g_gl.program, "oldTex");
+        g_gl.uNew     = glGetUniformLocation(g_gl.program, "newTex");
+
+        GLint prevVao = 0, prevBuf = 0;
+        glGetIntegerv(GL_VERTEX_ARRAY_BINDING, &prevVao);
+        glGetIntegerv(GL_ARRAY_BUFFER_BINDING, &prevBuf);
+        glGenVertexArrays(1, &g_gl.vao);
+        glGenBuffers(1, &g_gl.quad);
+        glBindVertexArray(g_gl.vao);
+        const float corners[] = {0, 0, 1, 0, 0, 1, 1, 1};
+        glBindBuffer(GL_ARRAY_BUFFER, g_gl.quad);
+        glBufferData(GL_ARRAY_BUFFER, sizeof(corners), corners, GL_STATIC_DRAW);
+        glEnableVertexAttribArray(0);
+        glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, 0, nullptr);
+        glBindVertexArray(prevVao);
+        glBindBuffer(GL_ARRAY_BUFFER, prevBuf);
+        return true;
+    }
+
+    std::optional<GLuint> fbID(const SP<Render::IFramebuffer>& fb) {
+        auto* gl = dynamic_cast<Render::GL::CGLFramebuffer*>(fb.get());
+        if (!gl)
+            return std::nullopt;
+        return gl->getFBID();
+    }
+
+    bool ensureFB(SP<Render::IFramebuffer>& fb, const SP<Render::IFramebuffer>& like, const char* name) {
+        if (fb && fb->m_size == like->m_size && fb->m_drmFormat == like->m_drmFormat)
+            return true;
+        if (!fb)
+            fb = g_pHyprRenderer->createFB(name);
+        return fb->alloc((int)like->m_size.x, (int)like->m_size.y, like->m_drmFormat);
+    }
+
+    void blit(const SP<Render::IFramebuffer>& from, const SP<Render::IFramebuffer>& to) {
+        const auto A = fbID(from), B = fbID(to);
+        if (!A || !B)
+            return;
+        GLint prevRead = 0, prevDraw = 0;
+        glGetIntegerv(GL_READ_FRAMEBUFFER_BINDING, &prevRead);
+        glGetIntegerv(GL_DRAW_FRAMEBUFFER_BINDING, &prevDraw);
+        const GLboolean SCISSOR = glIsEnabled(GL_SCISSOR_TEST);
+        glDisable(GL_SCISSOR_TEST);
+        glBindFramebuffer(GL_READ_FRAMEBUFFER, *A);
+        glBindFramebuffer(GL_DRAW_FRAMEBUFFER, *B);
+        const int W = (int)std::min(from->m_size.x, to->m_size.x), H = (int)std::min(from->m_size.y, to->m_size.y);
+        glBlitFramebuffer(0, 0, W, H, 0, 0, W, H, GL_COLOR_BUFFER_BIT, GL_NEAREST);
+        glBindFramebuffer(GL_READ_FRAMEBUFFER, prevRead);
+        glBindFramebuffer(GL_DRAW_FRAMEBUFFER, prevDraw);
+        if (SCISSOR)
+            glEnable(GL_SCISSOR_TEST);
+    }
+
+    // The render buffer only holds valid pixels inside this frame's damage (the
+    // rest is cleared), so copy just those rects into a persistent buffer.
+    // m_renderData.damage is in transformed monitor space; rotate it into the
+    // framebuffer's native orientation like Hyprland does (from hyprglass).
+    void blitDamage(const PHLMONITOR& mon, const SP<Render::IFramebuffer>& from, const SP<Render::IFramebuffer>& to) {
+        const auto A = fbID(from), B = fbID(to);
+        if (!A || !B)
+            return;
+        CRegion region = g_pHyprRenderer->m_renderData.damage.copy();
+        region.intersect(CBox{{}, mon->m_transformedSize});
+        region.transform(Math::wlTransformToHyprutils(Math::invertTransform(mon->m_transform)), mon->m_transformedSize.x, mon->m_transformedSize.y);
+        region.intersect(CBox{{}, from->m_size});
+        if (region.empty())
+            return;
+        GLint prevRead = 0, prevDraw = 0;
+        glGetIntegerv(GL_READ_FRAMEBUFFER_BINDING, &prevRead);
+        glGetIntegerv(GL_DRAW_FRAMEBUFFER_BINDING, &prevDraw);
+        const GLboolean SCISSOR = glIsEnabled(GL_SCISSOR_TEST);
+        glDisable(GL_SCISSOR_TEST);
+        glBindFramebuffer(GL_READ_FRAMEBUFFER, *A);
+        glBindFramebuffer(GL_DRAW_FRAMEBUFFER, *B);
+        for (const auto& r : region.getRects())
+            glBlitFramebuffer(r.x1, r.y1, r.x2, r.y2, r.x1, r.y1, r.x2, r.y2, GL_COLOR_BUFFER_BIT, GL_NEAREST);
+        glBindFramebuffer(GL_READ_FRAMEBUFFER, prevRead);
+        glBindFramebuffer(GL_DRAW_FRAMEBUFFER, prevDraw);
+        if (SCISSOR)
+            glEnable(GL_SCISSOR_TEST);
+    }
+
+    void drawTiles(SMonitorState& st, const SP<Render::IFramebuffer>& target, float t) {
+        if (!ensureGL() || st.instances.empty())
+            return;
+        const auto TARGET = fbID(target);
+        if (!TARGET)
+            return;
+
+        // save the GL state Hyprland relies on
+        GLint prevProg = 0, prevVao = 0, prevBuf = 0, prevFb = 0, prevActive = 0, prevTex0 = 0, prevTex1 = 0, vp[4];
+        glGetIntegerv(GL_CURRENT_PROGRAM, &prevProg);
+        glGetIntegerv(GL_VERTEX_ARRAY_BINDING, &prevVao);
+        glGetIntegerv(GL_ARRAY_BUFFER_BINDING, &prevBuf);
+        glGetIntegerv(GL_FRAMEBUFFER_BINDING, &prevFb);
+        glGetIntegerv(GL_ACTIVE_TEXTURE, &prevActive);
+        glActiveTexture(GL_TEXTURE0);
+        glGetIntegerv(GL_TEXTURE_BINDING_2D, &prevTex0);
+        glActiveTexture(GL_TEXTURE1);
+        glGetIntegerv(GL_TEXTURE_BINDING_2D, &prevTex1);
+        glGetIntegerv(GL_VIEWPORT, vp);
+        const GLboolean BLEND = glIsEnabled(GL_BLEND), SCISSOR = glIsEnabled(GL_SCISSOR_TEST);
+
+        glBindVertexArray(g_gl.vao);
+        if (!st.vbo)
+            glGenBuffers(1, &st.vbo);
+        glBindBuffer(GL_ARRAY_BUFFER, st.vbo);
+        if (!st.uploaded) {
+            glBufferData(GL_ARRAY_BUFFER, st.instances.size() * sizeof(SInstance), st.instances.data(), GL_STATIC_DRAW);
+            st.uploaded = true;
+        }
+        for (GLuint a = 1; a <= 3; ++a) {
+            glEnableVertexAttribArray(a);
+            glVertexAttribPointer(a, 2, GL_FLOAT, GL_FALSE, sizeof(SInstance), (void*)(uintptr_t)((a - 1) * 2 * sizeof(float)));
+            glVertexAttribDivisor(a, 1);
+        }
+
+        glBindFramebuffer(GL_FRAMEBUFFER, *TARGET);
+        glViewport(0, 0, (GLsizei)target->m_size.x, (GLsizei)target->m_size.y);
+        glDisable(GL_BLEND);
+        glDisable(GL_SCISSOR_TEST);
+        glUseProgram(g_gl.program);
+        glUniform1f(g_gl.uT, t);
+        glUniform2f(g_gl.uFb, (float)target->m_size.x, (float)target->m_size.y);
+        glUniform1f(g_gl.uTile, st.tile);
+        glUniform1f(g_gl.uStagger, STAGGER);
+        glUniform1i(g_gl.uOld, 0);
+        glUniform1i(g_gl.uNew, 1);
+        glActiveTexture(GL_TEXTURE0);
+        st.last->getTexture()->bind();
+        glActiveTexture(GL_TEXTURE1);
+        st.neu->getTexture()->bind();
+
+        glDrawArraysInstanced(GL_TRIANGLE_STRIP, 0, 4, (GLsizei)st.instances.size());
+
+        // restore
+        for (GLuint a = 1; a <= 3; ++a) {
+            glVertexAttribDivisor(a, 0);
+            glDisableVertexAttribArray(a);
+        }
+        glActiveTexture(GL_TEXTURE1);
+        glBindTexture(GL_TEXTURE_2D, prevTex1);
+        glActiveTexture(GL_TEXTURE0);
+        glBindTexture(GL_TEXTURE_2D, prevTex0);
+        glActiveTexture(prevActive);
+        glUseProgram(prevProg);
+        glBindVertexArray(prevVao);
+        glBindBuffer(GL_ARRAY_BUFFER, prevBuf);
+        glBindFramebuffer(GL_FRAMEBUFFER, prevFb);
+        glViewport(vp[0], vp[1], vp[2], vp[3]);
+        if (BLEND)
+            glEnable(GL_BLEND);
+        if (SCISSOR)
+            glEnable(GL_SCISSOR_TEST);
+    }
+
+    void pairTiles(SMonitorState& st, const PHLMONITOR& mon);
+
+    // ------------------------------------------------------- pass elements ---
+
+    bool ownMonitorFrame() {
+        const auto& rd = g_pHyprRenderer->m_renderData;
+        if (g_pHyprRenderer->m_bRenderingSnapshot || rd.projectionType != Render::RPT_MONITOR)
+            return false;
+        if (rd.mainFB && rd.currentFB != rd.mainFB)
+            return false;
+        return !(rd.renderModif.enabled && !rd.renderModif.modifs.empty());
+    }
+
+    class CElement : public IPassElement {
+      public:
+        enum eKind : uint8_t {
+            BG,
+            POST
+        };
+        explicit CElement(eKind k) : m_kind(k) {}
+
+        std::vector<UP<IPassElement>> draw() override {
+            const auto MON = g_pHyprRenderer->m_renderData.pMonitor.lock();
+            const auto CUR = g_pHyprRenderer->m_renderData.currentFB;
+            if (!MON || !CUR || CUR->m_size.x <= 0)
+                return {};
+            auto& st = g_mon[MON->m_id];
+
+            if (m_kind == BG) {
+                if (st.morphing && ensureFB(st.bg, CUR, "hyprmorph-bg"))
+                    blit(CUR, st.bg);
+                return {};
+            }
+
+            if (!st.morphing) {
+                // keep a complete picture of the workspace: a fresh buffer
+                // needs one full redraw before it holds everything
+                const bool FRESH = !st.last || st.last->m_size != CUR->m_size || st.last->m_drmFormat != CUR->m_drmFormat;
+                if (!ensureFB(st.last, CUR, "hyprmorph-last"))
+                    return {};
+                if (FRESH)
+                    g_pHyprRenderer->damageMonitor(MON);
+                blitDamage(MON, CUR, st.last);
+                return {};
+            }
+
+            const float T = std::chrono::duration<float>(Clock::now() - st.start).count() / MORPH_SECONDS;
+            if (T >= 1.f || !st.last || !st.bg || st.last->m_size != CUR->m_size || !ensureFB(st.neu, CUR, "hyprmorph-new")) {
+                st.morphing = false;
+                return {};
+            }
+            blit(CUR, st.neu); // the new workspace as it is right now
+            if (!st.paired) {
+                pairTiles(st, MON);
+                st.paired = true;
+                st.start  = Clock::now(); // the run starts when the tiles exist
+            }
+            blit(st.bg, CUR);      // take the windows off again ...
+            drawTiles(st, CUR, T); // ... and fly them in
+            return {};
+        }
+
+        bool                needsLiveBlur() override {
+            return false;
+        }
+        bool needsPrecomputeBlur() override {
+            return false;
+        }
+        const char* passName() override {
+            return "CHyprmorphElement";
+        }
+        ePassElementType type() override {
+            return EK_CUSTOM;
+        }
+        std::optional<CBox> boundingBox() override {
+            return std::nullopt;
+        }
+        bool disableSimplification() override {
+            return true;
+        }
+        bool undiscardable() override {
+            return true;
+        }
+
+      private:
+        eKind m_kind;
+    };
+
+    // ------------------------------------------------------------ pairing ---
+
+    uint64_t hilbert(uint32_t x, uint32_t y, uint32_t order) {
+        uint64_t d = 0;
+        for (uint32_t s = order / 2; s > 0; s /= 2) {
+            const uint32_t RX = (x & s) > 0, RY = (y & s) > 0;
+            d += (uint64_t)s * s * ((3 * RX) ^ RY);
+            if (RY == 0) {
+                if (RX == 1) {
+                    x = s - 1 - x;
+                    y = s - 1 - y;
+                }
+                std::swap(x, y);
+            }
+        }
+        return d;
+    }
+
+    // Average each tile of `fb` (downscaled blit) and read it back: RGBA8, rows bottom-up.
+    bool readTiles(const SP<Render::IFramebuffer>& fb, SP<Render::IFramebuffer>& small, uint32_t cols, uint32_t rows, std::vector<uint8_t>& out) {
+        if (!small)
+            small = g_pHyprRenderer->createFB("hyprmorph-tiles");
+        if (small->m_size != Vector2D{(double)cols, (double)rows} && !small->alloc((int)cols, (int)rows, DRM_FORMAT_ABGR8888))
+            return false;
+        const auto A = fbID(fb), B = fbID(small);
+        if (!A || !B)
+            return false;
+        GLint prevRead = 0, prevDraw = 0;
+        glGetIntegerv(GL_READ_FRAMEBUFFER_BINDING, &prevRead);
+        glGetIntegerv(GL_DRAW_FRAMEBUFFER_BINDING, &prevDraw);
+        const GLboolean SCISSOR = glIsEnabled(GL_SCISSOR_TEST);
+        glDisable(GL_SCISSOR_TEST);
+        glBindFramebuffer(GL_READ_FRAMEBUFFER, *A);
+        glBindFramebuffer(GL_DRAW_FRAMEBUFFER, *B);
+        glBlitFramebuffer(0, 0, (GLint)fb->m_size.x, (GLint)fb->m_size.y, 0, 0, (GLint)cols, (GLint)rows, GL_COLOR_BUFFER_BIT, GL_LINEAR);
+        glBindFramebuffer(GL_READ_FRAMEBUFFER, *B);
+        out.resize((size_t)cols * rows * 4);
+        glPixelStorei(GL_PACK_ALIGNMENT, 1);
+        glReadPixels(0, 0, (GLsizei)cols, (GLsizei)rows, GL_RGBA, GL_UNSIGNED_BYTE, out.data());
+        glBindFramebuffer(GL_READ_FRAMEBUFFER, prevRead);
+        glBindFramebuffer(GL_DRAW_FRAMEBUFFER, prevDraw);
+        if (SCISSOR)
+            glEnable(GL_SCISSOR_TEST);
+        return true;
+    }
+
+    // Pair tiles from what actually changed between the old and the new picture.
+    // Unchanged tiles stay put. Changed ones are ordered by brightness band,
+    // then along a Hilbert curve, and paired in that order: bright content
+    // (text, icons) flies to the new bright content, dark to dark, preferring
+    // nearby targets - the old picture rearranges itself into the new one.
+    void pairTiles(SMonitorState& st, const PHLMONITOR& mon) {
+        const Vector2D FB   = st.last->m_size;
+        const float    TILE = std::max(4.0, std::round(TILE_LOGICAL * mon->m_scale));
+        const uint32_t COLS = (uint32_t)std::ceil(FB.x / TILE), ROWS = (uint32_t)std::ceil(FB.y / TILE);
+        uint32_t       order = 1;
+        while (order < std::max(COLS, ROWS))
+            order *= 2;
+
+        std::vector<uint8_t> A, B;
+        st.instances.clear();
+        st.tile = TILE;
+        if (!readTiles(st.last, st.smallOld, COLS, ROWS, A) || !readTiles(st.neu, st.smallNew, COLS, ROWS, B))
+            return;
+
+        if (getenv("HYPRMORPH_DEBUG")) { // dump what the pairing saw (rows bottom-up)
+            for (int k = 0; k < 2; ++k) {
+                FILE* f = fopen(k ? "/tmp/hyprmorph-new.ppm" : "/tmp/hyprmorph-old.ppm", "wb");
+                if (!f)
+                    continue;
+                fprintf(f, "P6 %u %u 255\n", COLS, ROWS);
+                const auto& V = k ? B : A;
+                for (int y = (int)ROWS - 1; y >= 0; --y)
+                    for (uint32_t x = 0; x < COLS; ++x)
+                        fwrite(&V[((size_t)y * COLS + x) * 4], 1, 3, f);
+                fclose(f);
+            }
+        }
+        struct STile {
+            uint64_t key;
+            float    x, y;
+        };
+        std::vector<STile> src, dst;
+        std::mt19937                          rng(0x93);
+        std::uniform_real_distribution<float> delay(0.f, STAGGER), bow(0.5f, 1.f);
+        auto band = [](const uint8_t* c) { return (uint64_t)((0.2126f * c[0] + 0.7152f * c[1] + 0.0722f * c[2]) / 256.f * LUMA_BANDS); };
+
+        for (uint32_t cy = 0; cy < ROWS; ++cy) {
+            for (uint32_t cx = 0; cx < COLS; ++cx) {
+                const uint8_t* O    = &A[((size_t)cy * COLS + cx) * 4];
+                const uint8_t* N    = &B[((size_t)cy * COLS + cx) * 4];
+                const int      DIFF = std::max({std::abs(O[0] - N[0]), std::abs(O[1] - N[1]), std::abs(O[2] - N[2])});
+                const float    X = cx * TILE, Y = cy * TILE;
+                if (DIFF < CHANGE_THRESHOLD) {
+                    st.instances.push_back({X, Y, X, Y, delay(rng), 0.f}); // unchanged: stays put
+                    continue;
+                }
+                const uint64_t H = hilbert(cx, cy, order);
+                src.push_back({(band(O) << 40) | H, X, Y});
+                dst.push_back({(band(N) << 40) | H, X, Y});
+            }
+        }
+        auto byKey = [](const STile& a, const STile& b) { return a.key < b.key; };
+        std::sort(src.begin(), src.end(), byKey);
+        std::sort(dst.begin(), dst.end(), byKey);
+        for (size_t i = 0; i < src.size(); ++i)
+            st.instances.push_back({src[i].x, src[i].y, dst[i].x, dst[i].y, delay(rng), bow(rng) * CURL});
+    }
+
+    void startMorph(const PHLMONITOR& mon, const PHLWORKSPACE& from, const PHLWORKSPACE& to) {
+        auto& st = g_mon[mon->m_id];
+        if (!st.last || st.last->m_size.x <= 0)
+            return; // nothing captured yet
+        st.paired   = false; // pairing needs the new picture: done on the first frame
+        st.uploaded = false;
+        st.start    = Clock::now();
+        st.morphing = true;
+        g_pHyprRenderer->damageMonitor(mon);
+    }
+
+    void onWorkspaceActive(PHLWORKSPACE ws) {
+        if (!ws || ws->m_isSpecialWorkspace)
+            return;
+        const auto MON = ws->m_monitor.lock();
+        if (!MON)
+            return;
+        auto&      st   = g_mon[MON->m_id];
+        const auto PREV = st.lastWorkspace.lock();
+        st.lastWorkspace = ws;
+        if (PREV && PREV != ws && !PREV->m_isSpecialWorkspace && PREV->m_monitor.lock() == MON)
+            startMorph(MON, PREV, ws);
+    }
+
+    void onRenderStage(eRenderStage stage) {
+        if (stage == RENDER_POST) {
+            // keep frames coming (with full damage) while a morph runs
+            for (const auto& mon : State::monitorState()->monitors())
+                if (mon && g_mon.contains(mon->m_id) && g_mon[mon->m_id].morphing)
+                    g_pHyprRenderer->damageMonitor(mon);
+            return;
+        }
+        if (stage != RENDER_PRE_WINDOWS && stage != RENDER_POST_WINDOWS)
+            return;
+        if (!ownMonitorFrame())
+            return;
+        const auto MON = g_pHyprRenderer->m_renderData.pMonitor.lock();
+        if (!MON)
+            return;
+        if (stage == RENDER_PRE_WINDOWS) {
+            if (g_mon[MON->m_id].morphing)
+                g_pHyprRenderer->m_renderPass.add(makeUnique<CElement>(CElement::BG));
+        } else
+            g_pHyprRenderer->m_renderPass.add(makeUnique<CElement>(CElement::POST));
+    }
+}
+
+APICALL EXPORT std::string PLUGIN_API_VERSION() {
+    return HYPRLAND_API_VERSION;
+}
+
+APICALL EXPORT PLUGIN_DESCRIPTION_INFO PLUGIN_INIT(HANDLE handle) {
+    PHANDLE = handle;
+
+    for (const auto& MON : State::monitorState()->monitors())
+        if (MON && MON->m_activeWorkspace)
+            g_mon[MON->m_id].lastWorkspace = MON->m_activeWorkspace;
+
+    auto& ev = Event::bus()->m_events;
+    g_listeners.push_back(ev.monitor.added.listen([](PHLMONITOR MON) {
+        if (MON && MON->m_activeWorkspace)
+            g_mon[MON->m_id].lastWorkspace = MON->m_activeWorkspace;
+    }));
+    g_listeners.push_back(ev.workspace.active.listen([](PHLWORKSPACE ws) { onWorkspaceActive(ws); }));
+    g_listeners.push_back(ev.render.stage.listen([](eRenderStage s) { onRenderStage(s); }));
+
+    return {"hyprmorph", "Workspace switch as a flying-tile morph (arctis-hub style)", "guizzan", "0.2"};
+}
+
+APICALL EXPORT void PLUGIN_EXIT() {
+    g_listeners.clear();
+    for (auto& [id, st] : g_mon)
+        if (st.vbo)
+            glDeleteBuffers(1, &st.vbo);
+    g_mon.clear();
+    if (g_gl.program)
+        glDeleteProgram(g_gl.program);
+    if (g_gl.vao)
+        glDeleteVertexArrays(1, &g_gl.vao);
+    if (g_gl.quad)
+        glDeleteBuffers(1, &g_gl.quad);
+    g_gl = {};
+}

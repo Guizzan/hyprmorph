@@ -1,0 +1,129 @@
+// hyprmorph — on a workspace switch, every window of the new workspace starts
+// at the geometry of the closest window of the old workspace and animates into
+// its own place, so the old layout visibly morphs into the new one. Hyprland
+// stretches window contents during size animations, and the old workspace
+// fades out meanwhile (pair it with `style = "fade"` on the workspaces leaf).
+
+#include <hyprland/src/plugins/PluginAPI.hpp>
+#include <hyprland/src/event/EventBus.hpp>
+#include <hyprland/src/desktop/state/WindowState.hpp>
+#include <hyprland/src/desktop/view/Window.hpp>
+#include <hyprland/src/desktop/Workspace.hpp>
+#include <hyprland/src/output/Monitor.hpp>
+#include <hyprland/src/state/MonitorState.hpp>
+
+#include <unordered_map>
+#include <vector>
+#include <limits>
+
+inline HANDLE PHANDLE = nullptr;
+
+namespace {
+    CHyprSignalListener                            g_onActive;
+    CHyprSignalListener                            g_onMonitorAdded;
+    std::unordered_map<MONITORID, PHLWORKSPACEREF> g_lastWorkspace;
+
+    struct SBox {
+        Vector2D pos, size;
+        Vector2D center() const { return pos + size / 2.0; }
+    };
+
+    bool morphable(const PHLWINDOW& w, const PHLWORKSPACE& ws) {
+        return w && w->m_isMapped && !w->isHidden() && w->m_workspace == ws;
+    }
+
+    void onWorkspaceActive(PHLWORKSPACE ws) {
+        if (!ws || ws->m_isSpecialWorkspace)
+            return;
+        const auto MON = ws->m_monitor.lock();
+        if (!MON)
+            return;
+
+        const auto PREV = g_lastWorkspace[MON->m_id].lock();
+        g_lastWorkspace[MON->m_id] = ws;
+        if (!PREV || PREV == ws || PREV->m_isSpecialWorkspace)
+            return;
+
+        // Where the windows of the old workspace are (their resting geometry).
+        std::vector<SBox> from;
+        for (const auto& w : Desktop::windowState()->windows()) {
+            if (!morphable(w, PREV))
+                continue;
+            from.push_back({w->positionAnimation()->goal(), w->sizeAnimation()->goal()});
+        }
+
+        // Pair each new window with the nearest old one; old windows are used
+        // once first, then reused, so 1:1 layouts morph window-to-window.
+        std::vector<bool> used(from.size(), false);
+        for (const auto& w : Desktop::windowState()->windows()) {
+            if (!morphable(w, ws))
+                continue;
+
+            auto&      posAnim  = w->positionAnimation();
+            auto&      sizeAnim = w->sizeAnimation();
+            const auto GOALPOS  = posAnim->goal();
+            const auto GOALSIZE = sizeAnim->goal();
+            if (GOALSIZE.x <= 1 || GOALSIZE.y <= 1)
+                continue;
+
+            SBox start;
+            if (from.empty()) {
+                // Nothing to morph from: grow out of the window's own center.
+                start.size = GOALSIZE * 0.5;
+                start.pos  = GOALPOS + GOALSIZE / 4.0;
+            } else {
+                const Vector2D C = GOALPOS + GOALSIZE / 2.0;
+                size_t         best = 0;
+                double         bestDist = std::numeric_limits<double>::max();
+                for (int pass = 0; pass < 2 && bestDist == std::numeric_limits<double>::max(); ++pass) {
+                    for (size_t i = 0; i < from.size(); ++i) {
+                        if (pass == 0 && used[i])
+                            continue;
+                        const double D = from[i].center().distance(C);
+                        if (D < bestDist) {
+                            bestDist = D;
+                            best     = i;
+                        }
+                    }
+                }
+                used[best] = true;
+                start      = from[best];
+            }
+
+            posAnim->setValueAndWarp(start.pos);
+            sizeAnim->setValueAndWarp(start.size);
+            *posAnim  = GOALPOS;
+            *sizeAnim = GOALSIZE;
+        }
+    }
+}
+
+APICALL EXPORT std::string PLUGIN_API_VERSION() {
+    return HYPRLAND_API_VERSION;
+}
+
+APICALL EXPORT PLUGIN_DESCRIPTION_INFO PLUGIN_INIT(HANDLE handle) {
+    PHANDLE = handle;
+
+    // Remember what each monitor shows, so the first switch has something to
+    // morph from. Plugins load during config parsing, often before any monitor
+    // exists, so also record monitors as they are added.
+    for (const auto& MON : State::monitorState()->monitors()) {
+        if (MON && MON->m_activeWorkspace)
+            g_lastWorkspace[MON->m_id] = MON->m_activeWorkspace;
+    }
+    g_onMonitorAdded = Event::bus()->m_events.monitor.added.listen([](PHLMONITOR MON) {
+        if (MON && MON->m_activeWorkspace)
+            g_lastWorkspace[MON->m_id] = MON->m_activeWorkspace;
+    });
+
+    g_onActive = Event::bus()->m_events.workspace.active.listen([](PHLWORKSPACE ws) { onWorkspaceActive(ws); });
+
+    return {"hyprmorph", "Morph windows into each other on workspace switch", "guizzan", "0.1"};
+}
+
+APICALL EXPORT void PLUGIN_EXIT() {
+    g_onActive.reset();
+    g_onMonitorAdded.reset();
+    g_lastWorkspace.clear();
+}
