@@ -39,8 +39,19 @@ Try it in a nested session first: `Hyprland -c test/hyprland.lua`.
 
 ## Settings
 
-Run `settings/hyprmorph-settings` (GTK 4 + libadwaita; link it into your PATH and bind it to a key) to tune the effect
-live, or edit `~/.config/hyprmorph/settings.conf` by hand. The plugin re-reads the file (and, in theme mode, the
+A small settings app (GTK 4 + libadwaita) tunes the effect live: every change is saved at once and used from the
+next animation; its **Preview** button switches to the next workspace and back. Install it and bind it to a key:
+
+```sh
+ln -s "$PWD/settings/hyprmorph-settings" ~/.local/bin/
+ln -s "$PWD/settings/hyprmorph-settings.desktop" ~/.local/share/applications/   # app menu entry
+```
+
+```lua
+hl.bind("SUPER + ALT + M", hl.dsp.exec_cmd(os.getenv("HOME") .. "/.local/bin/hyprmorph-settings"), { description = "Morph settings" })
+```
+
+Or edit `~/.config/hyprmorph/settings.conf` by hand. The plugin re-reads the file (and, in theme mode, the
 matugen colours in `~/.config/ml4w/colors/colors.json`) between morphs.
 
 | key | default | |
