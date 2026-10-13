@@ -1,0 +1,7 @@
+[Desktop Entry]
+Type=Application
+Name=Morph settings
+Comment=Tune the hyprmorph window effects
+Exec=hyprmorph-settings
+Icon=preferences-desktop-effects
+Categories=Settings;DesktopSettings;

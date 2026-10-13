@@ -12,6 +12,7 @@ Every window change is a swarm of pixels. A Hyprland plugin that turns window an
 - **Open / close / resize / fullscreen** — Windows that change are rebuilt from their own pixels: each pixel flies from its spot in the old box to the same spot in the new one. Only pixels that actually changed move.
 - **Liquid-window drag** — Drag a window (SUPER + mouse) and it becomes a fixed-size blob made of its own pixels, still laid out like the window, with a wobbling outline, a liquid stretch along the movement and a short trail. Drop it and it flies back into place.
 - **Live destination** — The target picture is captured every frame, so moving content (video, terminals) keeps updating during the morph.
+- **Customizable** — A small settings app (hyprmorph-settings) tunes it live: pixel colours (the windows' own, the wallpaper theme, or custom colours), pixel size, detail, duration, stagger, path curve, which changes morph, and the drag blob's size, trail and wobble.
 
 ## Install
 
@@ -35,6 +36,23 @@ end
 Then log out and back in. Never hot-swap the plugin in a running session (unloading it can crash Hyprland), and run only one of these effect plugins at a time.
 
 Try it in a nested session first: `Hyprland -c test/hyprland.lua`.
+
+## Settings
+
+Run `settings/hyprmorph-settings` (GTK 4 + libadwaita; link it into your PATH and bind it to a key) to tune the effect
+live, or edit `~/.config/hyprmorph/settings.conf` by hand. The plugin re-reads the file (and, in theme mode, the
+matugen colours in `~/.config/ml4w/colors/colors.json`) between morphs.
+
+| key | default | |
+|---|---|---|
+| `morph_workspaces`, `morph_windows`, `drag_blob` | `true` | which changes are animated |
+| `color_mode` | `window` | `window` (the windows' own colours), `theme` (primary/tertiary from the wallpaper theme), `custom` |
+| `color_strength` | `0.7` | how strongly flying pixels take the colour |
+| `custom_color`, `custom_color2` | | colours for `custom` mode (pixels get a mix of the two) |
+| `pixel_size` | `3` | size of a pixel, physical px |
+| `detail` | `0.10` | contrast that counts as content; lower = more pixels fly |
+| `duration`, `stagger`, `curl` | `0.3`, `0.35`, `0.18` | seconds, take-off spread, path bend |
+| `blob_size`, `blob_trail`, `blob_wobble` | `160`, `1.6`, `1.0` | drag blob: half its longer side, tail length in blob sizes, outline wobble |
 
 ## See also
 

@@ -42,6 +42,8 @@
 #include <chrono>
 #include <cmath>
 #include <random>
+#include <filesystem>
+#include <fstream>
 #include <unordered_map>
 #include <vector>
 
@@ -49,19 +51,27 @@ static HANDLE PHANDLE = nullptr; // not inline: a GNU-unique symbol would pin th
 
 namespace {
     // the deck's constants (oled.py)
-    constexpr float MORPH_SECONDS = 0.3f;
-    constexpr float STAGGER       = 0.35f; // fraction of the run over which particles set off
-    constexpr float CURL          = 0.18f; // sideways bow of each flight path, per pixel travelled
+    // Tunables, read from ~/.config/hyprmorph/settings.conf (see loadSettings).
+    float MORPH_SECONDS = 0.3f;
+    float STAGGER       = 0.35f; // fraction of the run over which particles set off
+    float CURL          = 0.18f; // sideways bow of each flight path, per pixel travelled
 
     // desktop port
-    constexpr int    CELL_PX       = 3;     // one deck "pixel" = CELL_PX x CELL_PX physical pixels
+    int              CELL_PX       = 3;     // one deck "pixel" = CELL_PX x CELL_PX physical pixels
     constexpr int    LOCAL_RADIUS  = 6;     // cells; neighbourhood a pixel must stand out from to be "lit"
-    constexpr float  LIT_CONTRAST  = 0.10f; // luma difference from the neighbourhood that counts as lit
+    float            LIT_CONTRAST  = 0.10f; // luma difference from the neighbourhood that counts as lit
     constexpr int    LOW_DIV       = 12;    // background estimate resolution (cells per texel)
     constexpr double EDGE_LOGICAL  = 8.0;   // window boxes grown by this to take borders along
-    constexpr int    BLOB_CELL_PX  = 3;     // particle size of a window being dragged (same pixels as the morph)
+    int              BLOB_CELL_PX  = 3;     // particle size of a window being dragged (same pixels as the morph)
     constexpr float  BLOB_RAMP     = 0.25f; // pixels peel off over 1.5x this (staggered)
-    constexpr double BLOB_HALF     = 160.0;  // dragged window blob: half its longer side, logical px
+    double           BLOB_HALF     = 160.0;  // dragged window blob: half its longer side, logical px
+    // settings.conf only
+    bool  MORPH_WORKSPACES = true, MORPH_WINDOWS = true, DRAG_BLOB = true;
+    int   COLOR_MODE       = 0;    // 0 the windows' own colours, 1 theme (wallpaper) colours, 2 custom colour
+    float TINT             = 0.7f; // how strongly pixels take the colour (modes 1, 2)
+    float TINT_A[3] = {1, 1, 1}, TINT_B[3] = {1, 1, 1}; // gradient across the pixels
+    float BLOB_TRAIL  = 1.6f;      // tail length, in blob sizes
+    float BLOB_WOBBLE = 1.0f;      // outline waves and rim fizz
     constexpr int    SAME_DIFF     = 6;     // a cell whose pixels all differ by at most this (of 255) did not change
 
     using Clock = std::chrono::steady_clock;
@@ -134,6 +144,8 @@ uniform float stagger;
 out vec2  uvOld;
 out vec2  uvNew;
 out float mixAmt;
+out float flight;
+flat out float seed;
 void main() {
     float local = clamp((t - delayBow.x) / (1.0 - stagger), 0.0, 1.0);
     float e = local < 0.5 ? 4.0 * local * local * local
@@ -147,6 +159,8 @@ void main() {
     uvOld  = (src + corner * cell) / fbSize;
     uvNew  = (dst + corner * cell) / fbSize;
     mixAmt = delayBow.y < 0.0 ? 1.0 : e; // from off screen: new colour all the way
+    flight = sqrt(sin(3.14159265 * local)); // tinted while flying, true colour at both ends
+    seed   = fract(delayBow.x * 91.7 + abs(delayBow.y) * 13.3);
 }
 )";
 
@@ -155,11 +169,20 @@ precision highp float;
 in vec2  uvOld;
 in vec2  uvNew;
 in float mixAmt;
+in float flight;
+flat in float seed;
 uniform sampler2D oldTex;
 uniform sampler2D newTex;
+uniform vec3  tintA;
+uniform vec3  tintB;
+uniform float tint;
 out vec4 frag;
 void main() {
-    frag = mix(texture(oldTex, uvOld), texture(newTex, uvNew), mixAmt);
+    vec4 c = mix(texture(oldTex, uvOld), texture(newTex, uvNew), mixAmt);
+    // optional colour: the pixel keeps its brightness, takes the theme / custom hue
+    float l = dot(c.rgb, vec3(0.2126, 0.7152, 0.0722));
+    vec3  t = mix(tintA, tintB, seed) * (0.35 + 0.9 * l);
+    frag = vec4(mix(c.rgb, t, tint * flight), c.a);
 }
 )";
 
@@ -263,7 +286,10 @@ uniform vec2  fbSize;
 uniform float cell;
 uniform float time;
 uniform float amount;       // 0..1.5 since the drag began (pixels peel off staggered)
+uniform float wobble;
+uniform float trailLen;
 flat out vec2 uvC;
+flat out float seed;
 void main() {
     vec2  c   = rel + 0.5 * block;
     vec2  q   = (c / snapSize * 2.0 - 1.0) * halfSize;
@@ -275,14 +301,14 @@ void main() {
     float f     = len / rb;                                   // 0 centre .. 1 rim
     float re    = halfSize.x * halfSize.y / length(vec2(halfSize.y * dir.x, halfSize.x * dir.y));
     float edge  = f * f * f * f;
-    float shape = 1.0 + 0.10 * sin(3.0 * a + time * 1.3) + 0.07 * sin(5.0 * a - time * 2.1)
-                      + 0.05 * sin(2.0 * a + time * 0.7 + 1.7);
+    float shape = 1.0 + wobble * (0.10 * sin(3.0 * a + time * 1.3) + 0.07 * sin(5.0 * a - time * 2.1)
+                      + 0.05 * sin(2.0 * a + time * 0.7 + 1.7));
     float rr    = mix(rb, re, 0.55) * mix(1.0, shape, 0.35 + 0.65 * edge);
     vec2  off   = dir * f * rr;
     // living pixels: a small shimmer inside, a loose fizzing rim
     float ph = orbit.w * 6.2831853;
-    off += vec2(cos(orbit.x + time * orbit.z), sin(orbit.x + time * orbit.z)) * cell * (0.25 + 2.5 * edge);
-    off += dir * cell * 3.0 * edge * (0.5 + 0.5 * sin(time * 2.3 + ph));
+    off += vec2(cos(orbit.x + time * orbit.z), sin(orbit.x + time * orbit.z)) * cell * (0.25 + 2.5 * edge) * wobble;
+    off += dir * cell * 3.0 * edge * (0.5 + 0.5 * sin(time * 2.3 + ph)) * wobble;
     // trailing pixels follow the cursor's path with a delay and thin out
     float lag = orbit.y;
     float fi  = lag * float(max(trailCount - 1, 0));
@@ -291,7 +317,7 @@ void main() {
     vec2  at  = trailCount > 0 ? mix(trail[i0], trail[i1], fract(fi)) : cursor;
     // a short tail, as wide as the blob itself
     vec2  back    = at - (trailCount > 0 ? trail[0] : cursor);
-    float maxBack = 1.6 * max(halfSize.x, halfSize.y);
+    float maxBack = trailLen * max(halfSize.x, halfSize.y);
     if (length(back) > maxBack)
         at = (trailCount > 0 ? trail[0] : cursor) + back / length(back) * maxBack;
     off      *= 1.0 - 0.12 * lag;
@@ -313,14 +339,19 @@ void main() {
     p        = floor(p / cell + 0.5) * cell;
     gl_Position = vec4((p + corner * sz) / fbSize * 2.0 - 1.0, 0.0, 1.0);
     uvC         = c / snapSize;
+    seed        = orbit.w;
 }
 )";
 
     const char* BLOB_FRAG = R"(#version 300 es
 precision highp float;
 flat in vec2 uvC;
+flat in float seed;
 uniform sampler2D tex;
 uniform vec2 blockUv;     // one blob pixel in snapshot uv
+uniform vec3  tintA;
+uniform vec3  tintB;
+uniform float tint;
 out vec4 frag;
 void main() {
     // the average of the block this pixel stands for, so the shrunk window stays readable
@@ -328,7 +359,9 @@ void main() {
     for (int y = -1; y <= 1; y++)
         for (int x = -1; x <= 1; x++)
             c += texture(tex, uvC + vec2(x, y) * blockUv * 0.33).rgb;
-    frag = vec4(c / 9.0, 1.0);
+    c /= 9.0;
+    float l = dot(c, vec3(0.2126, 0.7152, 0.0722));
+    frag = vec4(mix(c, mix(tintA, tintB, seed) * (0.35 + 0.9 * l), tint), 1.0);
 }
 )";
 
@@ -337,7 +370,8 @@ void main() {
         GLint  dOld = -1, dNew = -1, dCell = -1, dFb = -1;
         GLint  oTrail = -1, oTrailCount = -1, oHalf = -1, oBlock = -1, oBlockUv = -1;
         GLint  oOrigin = -1, oSnap = -1, oCursor = -1, oRadius = -1, oFb = -1, oCell = -1, oTime = -1, oAmount = -1, oTex = -1;
-        GLint  pT = -1, pFb = -1, pCell = -1, pStagger = -1, pOld = -1, pNew = -1;
+        GLint  pT = -1, pFb = -1, pCell = -1, pStagger = -1, pOld = -1, pNew = -1, pTintA = -1, pTintB = -1, pTint = -1;
+        GLint  oTintA = -1, oTintB = -1, oTint = -1, oWobble = -1, oTrailLen = -1;
         GLint  bOld = -1, bNew = -1, bLowOld = -1, bLowNew = -1, bMask = -1, bBg = -1, bFb = -1, bCell = -1, bFade = -1, bT = -1;
         bool   failed = false;
     } g_gl;
@@ -407,6 +441,14 @@ void main() {
         g_gl.oHalf     = glGetUniformLocation(g_gl.blob, "halfSize");
         g_gl.oBlock    = glGetUniformLocation(g_gl.blob, "block");
         g_gl.oBlockUv  = glGetUniformLocation(g_gl.blob, "blockUv");
+        g_gl.oTintA    = glGetUniformLocation(g_gl.blob, "tintA");
+        g_gl.oTintB    = glGetUniformLocation(g_gl.blob, "tintB");
+        g_gl.oTint     = glGetUniformLocation(g_gl.blob, "tint");
+        g_gl.oWobble   = glGetUniformLocation(g_gl.blob, "wobble");
+        g_gl.oTrailLen = glGetUniformLocation(g_gl.blob, "trailLen");
+        g_gl.pTintA    = glGetUniformLocation(g_gl.part, "tintA");
+        g_gl.pTintB    = glGetUniformLocation(g_gl.part, "tintB");
+        g_gl.pTint     = glGetUniformLocation(g_gl.part, "tint");
         g_gl.oFb      = glGetUniformLocation(g_gl.blob, "fbSize");
         g_gl.oCell    = glGetUniformLocation(g_gl.blob, "cell");
         g_gl.oTime    = glGetUniformLocation(g_gl.blob, "time");
@@ -936,6 +978,9 @@ void main() {
             glUniform1f(g_gl.pStagger, STAGGER);
             glUniform1i(g_gl.pOld, 0);
             glUniform1i(g_gl.pNew, 1);
+            glUniform3fv(g_gl.pTintA, 1, TINT_A);
+            glUniform3fv(g_gl.pTintB, 1, TINT_B);
+            glUniform1f(g_gl.pTint, COLOR_MODE == 0 ? 0.f : TINT);
             glDrawArraysInstanced(GL_TRIANGLE_STRIP, 0, 4, (GLsizei)st.instances.size());
             for (GLuint a = 1; a <= 3; ++a) {
                 glVertexAttribDivisor(a, 0);
@@ -1091,6 +1136,11 @@ void main() {
         glUniform1f(g_gl.oCell, st.blobCell);
         glUniform1f(g_gl.oTime, SECS);
         glUniform1f(g_gl.oAmount, std::min(1.5f, SECS / BLOB_RAMP));
+        glUniform3fv(g_gl.oTintA, 1, TINT_A);
+        glUniform3fv(g_gl.oTintB, 1, TINT_B);
+        glUniform1f(g_gl.oTint, COLOR_MODE == 0 ? 0.f : TINT);
+        glUniform1f(g_gl.oWobble, BLOB_WOBBLE);
+        glUniform1f(g_gl.oTrailLen, BLOB_TRAIL);
         glUniform1i(g_gl.oTex, 0);
         glActiveTexture(GL_TEXTURE0);
         st.blobSnap->getTexture()->bind();
@@ -1292,6 +1342,8 @@ void main() {
 
     // A layout change morphs window by window; windows that stayed put are left alone.
     void startLayoutMorph(const PHLMONITOR& mon, const std::vector<SWinBox>& before, const std::vector<SWinBox>& after) {
+        if (!MORPH_WINDOWS)
+            return;
         auto& st = g_mon[mon->m_id];
         st.layoutPairs.clear();
         st.layoutGone.clear();
@@ -1324,7 +1376,7 @@ void main() {
         if (!g_layoutManager)
             return nullptr;
         const auto& DC = g_layoutManager->dragController();
-        if (!DC || DC->mode() == MBIND_INVALID) // (the threshold flag stays false with drag_threshold = 0)
+        if (!DRAG_BLOB || !DC || DC->mode() != MBIND_MOVE) // (the threshold flag stays false with drag_threshold = 0)
             return nullptr;
         const auto T = DC->target();
         const auto W = T ? T->window() : nullptr;
@@ -1447,9 +1499,108 @@ void main() {
         const auto PREV = st.lastWorkspace.lock();
         st.lastWorkspace = ws;
         if (PREV && PREV != ws && !PREV->m_isSpecialWorkspace && PREV->m_monitor.lock() == MON)
-            startMorph(MON, PREV, ws);
+            if (MORPH_WORKSPACES)
+                startMorph(MON, PREV, ws);
         st.cachedWs    = ws->m_id;
         st.cachedBoxes = windowBoxesId(ws);
+    }
+
+    // ----------------------------------------------------------- settings ---
+    // ~/.config/hyprmorph/settings.conf, `key = value` lines (the hyprmorph-settings
+    // app writes it). Re-read when it or the theme colours change; applied only
+    // between morphs so buffers sized by the pixel size stay consistent.
+    std::string homePath(const char* rel) {
+        const char* H = getenv("HOME");
+        return std::string(H ? H : "") + rel;
+    }
+
+    bool parseHex(const std::string& v, float out[3]) {
+        std::string h = v;
+        h.erase(std::remove_if(h.begin(), h.end(), [](char c) { return c == '#' || c == '"' || c == ' '; }), h.end());
+        if (h.size() < 6)
+            return false;
+        try {
+            for (int i = 0; i < 3; ++i)
+                out[i] = std::stoi(h.substr(i * 2, 2), nullptr, 16) / 255.f;
+        } catch (...) { return false; }
+        return true;
+    }
+
+    std::string themeColor(const std::string& json, const char* key) {
+        const auto K = json.find(std::string("\"") + key + "\"");
+        if (K == std::string::npos)
+            return "";
+        const auto H = json.find('#', K);
+        return H == std::string::npos ? "" : json.substr(H, 7);
+    }
+
+    std::filesystem::file_time_type g_setTime{}, g_themeTime{};
+    Clock::time_point               g_lastCheck{};
+
+    void loadSettings() {
+        if (std::chrono::duration<float>(Clock::now() - g_lastCheck).count() < 0.5f)
+            return;
+        g_lastCheck = Clock::now();
+        for (const auto& [id, st] : g_mon)
+            if (st.morphing || st.blobReady)
+                return; // not mid-morph
+        std::error_code ec;
+        const auto      SET = homePath("/.config/hyprmorph/settings.conf"), THEME = homePath("/.config/ml4w/colors/colors.json");
+        const auto      ST = std::filesystem::last_write_time(SET, ec);
+        const auto      TT = std::filesystem::last_write_time(THEME, ec);
+        if (ST == g_setTime && TT == g_themeTime)
+            return;
+        g_setTime   = ST;
+        g_themeTime = TT;
+
+        std::unordered_map<std::string, std::string> kv;
+        std::ifstream                                 f(SET);
+        for (std::string line; std::getline(f, line);) {
+            if (const auto C = line.find('#'); C != std::string::npos && line.find('=') > C)
+                continue;
+            const auto EQ = line.find('=');
+            if (EQ == std::string::npos)
+                continue;
+            auto trim = [](std::string x) {
+                x.erase(0, x.find_first_not_of(" \t"));
+                x.erase(x.find_last_not_of(" \t\r") + 1);
+                return x;
+            };
+            kv[trim(line.substr(0, EQ))] = trim(line.substr(EQ + 1));
+        }
+        auto num = [&](const char* k, float def, float lo, float hi) {
+            try {
+                return kv.contains(k) ? std::clamp(std::stof(kv[k]), lo, hi) : def;
+            } catch (...) { return def; }
+        };
+        auto flag = [&](const char* k, bool def) { return kv.contains(k) ? (kv[k] == "true" || kv[k] == "1" || kv[k] == "yes") : def; };
+
+        MORPH_WORKSPACES = flag("morph_workspaces", true);
+        MORPH_WINDOWS    = flag("morph_windows", true);
+        DRAG_BLOB        = flag("drag_blob", true);
+        MORPH_SECONDS    = num("duration", 0.3f, 0.1f, 2.f);
+        STAGGER          = num("stagger", 0.35f, 0.f, 0.85f);
+        CURL             = num("curl", 0.18f, 0.f, 0.8f);
+        CELL_PX          = (int)num("pixel_size", 3.f, 2.f, 12.f);
+        BLOB_CELL_PX     = CELL_PX;
+        LIT_CONTRAST     = num("detail", 0.10f, 0.03f, 0.4f);
+        BLOB_HALF        = num("blob_size", 160.f, 60.f, 400.f);
+        BLOB_TRAIL       = num("blob_trail", 1.6f, 0.f, 4.f);
+        BLOB_WOBBLE      = num("blob_wobble", 1.f, 0.f, 3.f);
+        TINT             = num("color_strength", 0.7f, 0.f, 1.f);
+        const std::string MODE = kv.contains("color_mode") ? kv["color_mode"] : "window";
+        COLOR_MODE             = MODE == "theme" ? 1 : MODE == "custom" ? 2 : 0;
+        if (COLOR_MODE == 1) {
+            std::ifstream     tf(THEME);
+            const std::string J((std::istreambuf_iterator<char>(tf)), std::istreambuf_iterator<char>());
+            if (!parseHex(themeColor(J, "primary"), TINT_A) || !parseHex(themeColor(J, "tertiary"), TINT_B))
+                COLOR_MODE = 0;
+        } else if (COLOR_MODE == 2) {
+            if (!parseHex(kv["custom_color"], TINT_A))
+                COLOR_MODE = 0;
+            if (!kv.contains("custom_color2") || !parseHex(kv["custom_color2"], TINT_B))
+                std::copy(TINT_A, TINT_A + 3, TINT_B);
+        }
     }
 
     void onRenderStage(eRenderStage stage) {
@@ -1462,6 +1613,8 @@ void main() {
         }
         if (stage != RENDER_PRE_WINDOWS && stage != RENDER_POST_WINDOWS)
             return;
+        if (stage == RENDER_PRE_WINDOWS)
+            loadSettings();
         if (!ownMonitorFrame())
             return;
         const auto MON = g_pHyprRenderer->m_renderData.pMonitor.lock();
