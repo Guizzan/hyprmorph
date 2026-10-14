@@ -55,11 +55,12 @@ void main() {
     // where this dot sits in the pill: dots shrink away toward the edge
     vec2 hs = size * 0.5;
     float sd = sdRound(c - hs, hs, min(radius, min(hs.x, hs.y)));
-    float inside = smoothstep(0.0, spacing * 3.0, -sd);
+    // (a narrow fade: the bar is only ~40 px tall, a wide one never reaches full)
+    float inside = smoothstep(0.0, 5.0, -sd);
     // a solid dark base under the dots, so whatever lies behind the bar / dock
     // never shows through the icons and text; it dissolves at the edge too
     float sdp = sdRound(p - hs, hs, min(radius, min(hs.x, hs.y)));
-    float veil = 0.82 * smoothstep(0.0, spacing * 4.0, -sdp);
+    float veil = 0.94 * smoothstep(0.0, 4.0, -sdp);
 
     // slow light wave flowing along, plus each dot's own breathing
     float wave = 0.5 + 0.5 * sin(c.x * 0.018 - time * 0.9 + sin(c.y * 0.05 + time * 0.3) * 1.2);
@@ -73,14 +74,15 @@ void main() {
         ring = rippleA * exp(-k * k);
     }
     // a few dots twinkle in the accent colours
-    float tw = h > 0.94 ? pow(0.5 + 0.5 * sin(time * (1.5 + h * 3.0) + h * 70.0), 6.0) : 0.0;
+    float tw = h > 0.97 ? pow(0.5 + 0.5 * sin(time * (1.5 + h * 3.0) + h * 70.0), 6.0) : 0.0;
 
     float glow = clamp(spot + ring + tw, 0.0, 1.0);
     float r = spacing * (0.36 + 0.06 * wave) * breathe * inside * (1.0 + 0.35 * glow);
     float d = length(ps - c);
     float a = smoothstep(r + 0.75, r - 0.75, d);
 
-    vec3 base = colorBg.rgb * (1.6 + 1.2 * wave) + vec3(0.05);
+    // dots a little lighter than the base: texture, not noise behind the text
+    vec3 base = colorBg.rgb * (1.25 + 0.45 * wave) + vec3(0.025);
     vec3 accent = mix(colorA.rgb, colorB.rgb, step(0.5, fract(h * 7.0)));
     vec3 col = mix(base, accent * 1.15, glow);
     float alpha = a * mix(0.9, 1.0, glow) * inside;
