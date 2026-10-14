@@ -33,9 +33,9 @@ DEFAULTS = {
     "blob_size": 160,
     "blob_trail": 1.6,
     "blob_wobble": 1.0,
-    "bar_pixels": True,
-    "bar_pixel_density": 1.0,
-    "bar_pixel_react": 1.0,
+    "bar_morph": True,
+    "bar_morph_duration": 0.45,
+    "bar_morph_pixel": 2,
 }
 MODES = [("window", "Window colours"), ("theme", "Theme colours (from the wallpaper)"), ("custom", "Custom colours")]
 
@@ -143,10 +143,10 @@ class Window(Adw.ApplicationWindow):
         g.add(self.scale("blob_wobble", "Wobble", "Outline waves and fizzing rim", 0, 3, 0.1, 1))
         page.add(g)
 
-        g = Adw.PreferencesGroup(title="Bar & dock", description="The bar and dock background as a living dot-matrix: a light wave flows across it, the cursor lights the dots up and bulges them like a lens.")
-        g.add(self.switch("bar_pixels", "Dot-matrix background", "Instead of the solid bar and dock background"))
-        g.add(self.scale("bar_pixel_density", "Dot density", "Higher: finer, denser grid", 0.35, 3, 0.05, 2))
-        g.add(self.scale("bar_pixel_react", "Cursor glow & lens", "How strongly dots light up and bulge around the cursor (0 = off)", 0, 3, 0.1, 1))
+        g = Adw.PreferencesGroup(title="Bar & dock", description="The ML4W bar and dock appear and disappear as a pixel morph instead of sliding.")
+        g.add(self.switch("bar_morph", "Pixel morph", "Cells fly in from / out to the screen edge"))
+        g.add(self.scale("bar_morph_duration", "Duration", "Seconds", 0.15, 1.5, 0.05, 2))
+        g.add(self.scale("bar_morph_pixel", "Pixel size", "Size of the flying cells", 1, 8, 1, 0))
         page.add(g)
 
         view = Adw.ToolbarView()
