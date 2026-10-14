@@ -67,7 +67,7 @@ Item {
         group: "a"
         enabled: false
         lifeSpan: 900; lifeSpanVariation: 450
-        size: 4; sizeVariation: 1; endSize: 1
+        size: 2.2; sizeVariation: 0.6; endSize: 0.8
         velocity: AngleDirection { angle: root.dirAngle; angleVariation: 32; magnitude: 260; magnitudeVariation: 150 }
         acceleration: AngleDirection { angle: root.dirAngle; magnitude: 420 }
     }
@@ -77,7 +77,7 @@ Item {
         group: "b"
         enabled: false
         lifeSpan: 1100; lifeSpanVariation: 500
-        size: 3; sizeVariation: 1; endSize: 1
+        size: 1.6; sizeVariation: 0.5; endSize: 0.6
         velocity: AngleDirection { angle: root.dirAngle; angleVariation: 55; magnitude: 170; magnitudeVariation: 110 }
         acceleration: AngleDirection { angle: root.dirAngle; magnitude: 300 }
     }

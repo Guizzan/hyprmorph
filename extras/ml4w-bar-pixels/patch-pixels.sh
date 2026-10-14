@@ -98,6 +98,35 @@ $5
 EOF
 }
 
+# Readable on anything without a pill: a soft dark halo around text and icons.
+halo() { # file id...
+    python3 -I - "$@" <<'PY'
+import sys
+path, ids = sys.argv[1], sys.argv[2:]
+s = open(path).read()
+if "PIXEL-HALO" in s:
+    sys.exit(0)
+for i in ids:
+    a = "            id: %s\n" % i
+    if s.count(a) != 1:
+        print("patch-pixels: halo anchor", i, "not found in", path, file=sys.stderr); sys.exit(1)
+    s = s.replace(a, a + """            // PIXEL-HALO: a soft dark halo so text / icons read without a pill
+            layer.enabled: true
+            layer.effect: MultiEffect {
+                shadowEnabled: true
+                shadowColor: "black"
+                shadowBlur: 0.55
+                shadowOpacity: 0.9
+                shadowHorizontalOffset: 0
+                shadowVerticalOffset: 0
+                blurMax: 20
+            }
+""", 1)
+open(path, "w").write(s)
+print("patch-pixels: halos in", path)
+PY
+}
+
 if [ -f "$bar" ]; then
     install_component "$(dirname "$bar")"
     patch "$bar" '        // ==========================================
@@ -106,7 +135,7 @@ if [ -f "$bar" ]; then
             function onExpandedChanged() { if (pill.expanded) pixelField.burst(60) }
         }')
 
-" && hide_pill "$bar"
+" && hide_pill "$bar" && halo "$bar" leftArea centerArea rightArea
 fi
 
 if [ -f "$dock" ]; then
@@ -114,5 +143,5 @@ if [ -f "$dock" ]; then
     patch "$dock" '        RowLayout {
             id: dockRow' "$(block DockTheme.primary DockTheme.on_surface_variant 1 -1 '')
 
-" && hide_pill "$dock"
+" && hide_pill "$dock" && halo "$dock" dockRow
 fi

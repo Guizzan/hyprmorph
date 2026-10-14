@@ -68,12 +68,13 @@ matugen colours in `~/.config/ml4w/colors/colors.json`) between morphs.
 
 ## Floating pixels in the ML4W bar and dock
 
-`extras/ml4w-bar-pixels/` draws the pills of the [ML4W](https://github.com/mylinuxforwork/dotfiles) Quickshell bar
-and dock in pixels: the pill background is hidden (also turn off any compositor glass on those layers), a shimmering
-line of pixels in the theme colours traces their outline with a light dust inside, behind the icons and text. The
-cursor pushes the pixels away and sheds sparks; when the bar or dock slides out of view (or back in) a spray of
-pixels flies off in the direction it moves. Install with `extras/ml4w-bar-pixels/patch-pixels.sh` (idempotent;
-re-run after ML4W updates). It reads the same settings file.
+`extras/ml4w-bar-pixels/` turns the pills of the [ML4W](https://github.com/mylinuxforwork/dotfiles) Quickshell bar
+and dock into a small physics world: the pill background is hidden (also turn off any compositor glass on those
+layers) and ~1000 tiny particles live inside it - heavy grains that fall, bounce, collide and pile up like sand, and
+floating dust with Brownian motion. The cursor stirs them (its velocity is transferred, it pushes them aside), the
+bar / dock sliding or resizing makes them slosh, and on hide / show a spray of pixels flies off in the direction of
+the slide. Text and icons get a soft dark halo so they stay readable on any wallpaper. Install with
+`extras/ml4w-bar-pixels/patch-pixels.sh` (idempotent; re-run after ML4W updates). It reads the same settings file.
 
 ## See also
 
