@@ -1,8 +1,8 @@
-// PixelField — the bar / dock made of floating pixels (hyprmorph theme): the pill
-// background is hidden, a dense cloud of pixels in its shape takes its place.
-// Square pixels in the theme colours drift and twinkle inside the pill; the
-// cursor pushes them away like a force field and sheds sparks as it moves;
-// burst() throws a puff of pixels (used when the bar expands).
+// PixelField — the bar / dock pill drawn in pixels (hyprmorph theme).
+// The pill background is hidden; instead a shimmering line of pixels traces
+// its edges, with a light dust of pixels inside, behind the content (icons and
+// text stay clear). The cursor pushes pixels away and sheds sparks; burst()
+// throws a puff (bar expanding).
 // Settings (live): ~/.config/hyprmorph/settings.conf
 //   bar_pixels = true | false, bar_pixel_density = 0..3, bar_pixel_react = 0..3
 // Installed into the bar and the dock by ~/.config/ml4w-statusbar/patch-pixels.sh.
@@ -28,17 +28,16 @@ Item {
     property real react: 1.0
 
     readonly property bool active: enabledSetting && width > 8 && height > 8 && visible
+    readonly property real edge: 3 // thickness of the pixel outline band
 
     function burst(n) {
         if (!active)
             return
-        floatA.burst(Math.round(n * 0.6))
-        floatB.burst(Math.round(n * 0.4))
+        dust.burst(n)
     }
 
     // --- settings file ----------------------------------------------------
     FileView {
-        id: conf
         path: Quickshell.env("HOME") + "/.config/hyprmorph/settings.conf"
         watchChanges: true
         printErrors: false
@@ -87,22 +86,22 @@ Item {
 
         ImageParticle {
             system: sys
-            groups: ["a"]
+            groups: ["edge"]
             source: Qt.resolvedUrl("pixel.png")
             color: root.colorA
-            colorVariation: 0.08
-            alpha: 0.75
-            alphaVariation: 0.25
+            colorVariation: 0.06
+            alpha: 0.9
+            alphaVariation: 0.3
             entryEffect: ImageParticle.Fade
         }
         ImageParticle {
             system: sys
-            groups: ["b"]
+            groups: ["dust"]
             source: Qt.resolvedUrl("pixel.png")
             color: root.colorB
             colorVariation: 0.08
-            alpha: 0.6
-            alphaVariation: 0.3
+            alpha: 0.35
+            alphaVariation: 0.25
             entryEffect: ImageParticle.Fade
         }
         ImageParticle {
@@ -114,30 +113,55 @@ Item {
             entryEffect: ImageParticle.Fade
         }
 
-        // drifting pixels all over the pill
+        // the outline: top, bottom and the two rounded ends
         Emitter {
-            id: floatA
             system: sys
-            group: "a"
-            anchors.fill: parent
-            emitRate: root.active ? Math.max(4, root.width * root.height / 170 * root.density) : 0
-            lifeSpan: 4200
-            lifeSpanVariation: 1800
-            size: 3
-            sizeVariation: 1
-            velocity: AngleDirection { angleVariation: 360; magnitude: 4; magnitudeVariation: 4 }
+            group: "edge"
+            x: root.radius * 0.6; y: 0
+            width: root.width - root.radius * 1.2; height: root.edge
+            emitRate: root.active ? root.width / 5 * root.density : 0
+            lifeSpan: 2600; lifeSpanVariation: 1200
+            size: 3; sizeVariation: 1
+            velocity: AngleDirection { angle: 0; angleVariation: 180; magnitude: 5; magnitudeVariation: 5 }
         }
         Emitter {
-            id: floatB
             system: sys
-            group: "b"
+            group: "edge"
+            x: root.radius * 0.6; y: root.height - root.edge
+            width: root.width - root.radius * 1.2; height: root.edge
+            emitRate: root.active ? root.width / 5 * root.density : 0
+            lifeSpan: 2600; lifeSpanVariation: 1200
+            size: 3; sizeVariation: 1
+            velocity: AngleDirection { angle: 0; angleVariation: 180; magnitude: 5; magnitudeVariation: 5 }
+        }
+        Emitter {
+            system: sys
+            group: "edge"
+            x: 0; y: 0; width: root.edge + 1; height: root.height
+            emitRate: root.active ? root.height / 4 * root.density : 0
+            lifeSpan: 2600; lifeSpanVariation: 1200
+            size: 3; sizeVariation: 1
+            velocity: AngleDirection { angle: 90; angleVariation: 180; magnitude: 4; magnitudeVariation: 4 }
+        }
+        Emitter {
+            system: sys
+            group: "edge"
+            x: root.width - root.edge - 1; y: 0; width: root.edge + 1; height: root.height
+            emitRate: root.active ? root.height / 4 * root.density : 0
+            lifeSpan: 2600; lifeSpanVariation: 1200
+            size: 3; sizeVariation: 1
+            velocity: AngleDirection { angle: 90; angleVariation: 180; magnitude: 4; magnitudeVariation: 4 }
+        }
+        // light dust inside
+        Emitter {
+            id: dust
+            system: sys
+            group: "dust"
             anchors.fill: parent
-            emitRate: root.active ? Math.max(2, root.width * root.height / 300 * root.density) : 0
-            lifeSpan: 4800
-            lifeSpanVariation: 2000
-            size: 2
-            sizeVariation: 1
-            velocity: AngleDirection { angleVariation: 360; magnitude: 3; magnitudeVariation: 3 }
+            emitRate: root.active ? root.width * root.height / 2600 * root.density : 0
+            lifeSpan: 3800; lifeSpanVariation: 1600
+            size: 2; sizeVariation: 1
+            velocity: AngleDirection { angleVariation: 360; magnitude: 4; magnitudeVariation: 4 }
         }
 
         // sparks shed by the moving cursor
@@ -157,19 +181,26 @@ Item {
             velocity: AngleDirection { angleVariation: 360; magnitude: 45; magnitudeVariation: 30 }
         }
 
-        // floating: a lazy random walk
         Wander {
             system: sys
-            groups: ["a", "b"]
+            groups: ["edge"]
             anchors.fill: parent
-            xVariance: 14
+            xVariance: 10
+            yVariance: 2
+            pace: 20
+        }
+        Wander {
+            system: sys
+            groups: ["dust"]
+            anchors.fill: parent
+            xVariance: 12
             yVariance: 8
             pace: 25
         }
         // the cursor pushes pixels away
         Attractor {
             system: sys
-            groups: ["a", "b"]
+            groups: ["edge", "dust"]
             anchors.fill: parent
             enabled: root.active && root.hovered && root.react > 0
             pointX: root.cursor.x
@@ -178,10 +209,9 @@ Item {
             affectedParameter: Attractor.Velocity
             proportionalToDistance: Attractor.InverseQuadratic
         }
-        // and they settle down again
         Friction {
             system: sys
-            groups: ["a", "b", "spark"]
+            groups: ["edge", "dust", "spark"]
             anchors.fill: parent
             factor: 2.2
         }

@@ -1,13 +1,16 @@
 #!/usr/bin/env bash
-# Adds the floating PixelField (hyprmorph theme) behind the content of the ML4W
-# bar and dock pills. Idempotent; ML4W updates overwrite those files, so the
-# installer's user post.sh re-runs this. Component: ~/.config/ml4w-statusbar/pixels/
-src="${PIXELS_SRC:-$(cd "$(dirname "$0")" && pwd)}" # PixelField.qml + pixel.png
-bar="${1:-$HOME/.config/quickshell/StatusbarApp/StatusbarWindow.qml}" # (the installer passes the fresh copy)
+# The ML4W bar and dock pills drawn in pixels (hyprmorph theme): hides the pill
+# background and puts a PixelField (pixel outline + dust, behind the content)
+# and a PixelTrail (pixels flying off in the direction of each hide / show
+# slide) into StatusbarWindow.qml and DockWindow.qml. Idempotent; ML4W updates
+# overwrite those files, so the installer's user post.sh re-runs this.
+# Usage: patch-pixels.sh [path/to/StatusbarWindow.qml]
+src="${PIXELS_SRC:-$(cd "$(dirname "$0")" && pwd)}" # PixelField.qml, PixelTrail.qml, pixel.png
+bar="${1:-$HOME/.config/quickshell/StatusbarApp/StatusbarWindow.qml}"
 dock="$HOME/.local/share/ml4w-dock/DockApp/DockWindow.qml"
 
 install_component() { # dir
-    cp -f "$src/PixelField.qml" "$src/pixel.png" "$1/"
+    cp -f "$src/PixelField.qml" "$src/PixelTrail.qml" "$src/pixel.png" "$1/"
 }
 
 patch() { # file anchor block
@@ -15,39 +18,16 @@ patch() { # file anchor block
 import sys
 path, anchor, block = sys.argv[1:4]
 s = open(path).read()
-if "PIXEL-FIELD" in s:
+if "PIXEL-FIELD-2" in s:
     print("patch-pixels: already patched", path); sys.exit(0)
+if "PIXEL-FIELD" in s:
+    print("patch-pixels: an older pixel patch is in", path, "- restore the original first", file=sys.stderr); sys.exit(1)
 if s.count(anchor) != 1:
     print("patch-pixels: anchor not found in", path, "(upstream changed?)", file=sys.stderr); sys.exit(1)
 open(path, "w").write(s.replace(anchor, block + anchor, 1))
 print("patch-pixels: patched", path)
 PY
 }
-
-if [ -f "$bar" ]; then
-    install_component "$(dirname "$bar")"
-    patch "$bar" '        // ==========================================
-        // LEFT AREA (only visible when expanded)' '        // PIXEL-FIELD (patch-pixels.sh): floating pixels behind the modules
-        HoverHandler { id: pixelHover }
-        PixelField {
-            id: pixelField
-            anchors.fill: pillBg
-            anchors.margins: root.settings.border.width
-            radius: Math.max(0, pillBg.radius - root.settings.border.width)
-            colorA: Theme.primary
-            colorB: Theme.tertiary
-            hovered: pixelHover.hovered
-            cursor: pixelHover.hovered
-                ? Qt.point(pixelHover.point.position.x - anchors.margins, pixelHover.point.position.y - anchors.margins)
-                : Qt.point(-1000, -1000)
-        }
-        Connections {
-            target: pill
-            function onExpandedChanged() { if (pill.expanded) pixelField.burst(80) }
-        }
-
-'
-fi
 
 # Only pixels: hide the pill background and its shadow.
 hide_pill() { # file
@@ -71,30 +51,68 @@ open(path, "w").write(s)
 print("patch-pixels: pill hidden in", path)
 PY
 }
-[ -f "$bar" ] && hide_pill "$bar"
+
+# block COLOR_A COLOR_B HIDE_DIR SHOW_DIR EXPAND_HOOK
+block() {
+cat <<EOF
+        // PIXEL-FIELD-2 (patch-pixels.sh): the pill drawn in pixels, behind the content
+        HoverHandler { id: pixelHover }
+        PixelField {
+            id: pixelField
+            z: -1
+            anchors.fill: pillBg
+            radius: pillBg.radius
+            colorA: $1
+            colorB: $2
+            hovered: pixelHover.hovered
+            cursor: pixelHover.hovered ? pixelHover.point.position : Qt.point(-1000, -1000)
+        }
+        // pixels flying off in the direction of each slide, free over the whole window
+        PixelTrail {
+            id: pixelTrail
+            parent: pill.parent
+            // a 1x1 item: its pixels fly over the whole window, but it is never
+            // under the pointer, so the bar / dock hover (autohide) is untouched
+            x: 0; y: 0; width: 1; height: 1
+            z: 100
+            enabled: false
+            colorA: $1
+            colorB: $2
+            active: pixelField.enabledSetting
+        }
+        Timer {
+            id: pixelShow
+            interval: 160
+            onTriggered: pixelTrail.fly(pill.mapToItem(pill.parent, 0, 0, pill.width, pill.height), $4, 110)
+        }
+        Connections {
+            target: root
+            function onRevealedChanged() {
+                if (root.revealed)
+                    pixelShow.restart()
+                else
+                    pixelTrail.fly(pill.mapToItem(pill.parent, 0, 0, pill.width, pill.height), $3, 180)
+            }
+        }
+$5
+EOF
+}
+
+if [ -f "$bar" ]; then
+    install_component "$(dirname "$bar")"
+    patch "$bar" '        // ==========================================
+        // LEFT AREA (only visible when expanded)' "$(block Theme.primary Theme.tertiary -1 1 '        Connections {
+            target: pill
+            function onExpandedChanged() { if (pill.expanded) pixelField.burst(60) }
+        }')
+
+" && hide_pill "$bar"
+fi
 
 if [ -f "$dock" ]; then
     install_component "$(dirname "$dock")"
     patch "$dock" '        RowLayout {
-            id: dockRow' '        // PIXEL-FIELD (patch-pixels.sh): floating pixels behind the icons
-        HoverHandler { id: pixelHover }
-        PixelField {
-            id: pixelField
-            anchors.fill: pillBg
-            anchors.margins: root.settings.border.width
-            radius: Math.max(0, pillBg.radius - root.settings.border.width)
-            colorA: DockTheme.primary
-            colorB: DockTheme.on_surface_variant
-            hovered: pixelHover.hovered
-            cursor: pixelHover.hovered
-                ? Qt.point(pixelHover.point.position.x - anchors.margins, pixelHover.point.position.y - anchors.margins)
-                : Qt.point(-1000, -1000)
-        }
-        Connections {
-            target: root
-            function onRevealedChanged() { if (root.revealed) pixelField.burst(60) }
-        }
+            id: dockRow' "$(block DockTheme.primary DockTheme.on_surface_variant 1 -1 '')
 
-'
-    hide_pill "$dock"
+" && hide_pill "$dock"
 fi
