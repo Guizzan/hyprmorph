@@ -56,10 +56,10 @@ void main() {
     vec2 hs = size * 0.5;
     float sd = sdRound(c - hs, hs, min(radius, min(hs.x, hs.y)));
     float inside = smoothstep(0.0, spacing * 3.0, -sd);
-    if (inside <= 0.0) {
-        fragColor = vec4(0.0);
-        return;
-    }
+    // a solid dark base under the dots, so whatever lies behind the bar / dock
+    // never shows through the icons and text; it dissolves at the edge too
+    float sdp = sdRound(p - hs, hs, min(radius, min(hs.x, hs.y)));
+    float veil = 0.82 * smoothstep(0.0, spacing * 4.0, -sdp);
 
     // slow light wave flowing along, plus each dot's own breathing
     float wave = 0.5 + 0.5 * sin(c.x * 0.018 - time * 0.9 + sin(c.y * 0.05 + time * 0.3) * 1.2);
@@ -76,14 +76,18 @@ void main() {
     float tw = h > 0.94 ? pow(0.5 + 0.5 * sin(time * (1.5 + h * 3.0) + h * 70.0), 6.0) : 0.0;
 
     float glow = clamp(spot + ring + tw, 0.0, 1.0);
-    float r = spacing * (0.30 + 0.07 * wave) * breathe * inside * (1.0 + 0.45 * glow);
+    float r = spacing * (0.36 + 0.06 * wave) * breathe * inside * (1.0 + 0.35 * glow);
     float d = length(ps - c);
     float a = smoothstep(r + 0.75, r - 0.75, d);
 
-    vec3 base = colorBg.rgb * (1.0 + 0.9 * wave) + vec3(0.035);
+    vec3 base = colorBg.rgb * (1.6 + 1.2 * wave) + vec3(0.05);
     vec3 accent = mix(colorA.rgb, colorB.rgb, step(0.5, fract(h * 7.0)));
     vec3 col = mix(base, accent * 1.15, glow);
-    float alpha = a * mix(0.88, 1.0, glow) * inside;
+    float alpha = a * mix(0.9, 1.0, glow) * inside;
 
-    fragColor = vec4(col * alpha, alpha) * qt_Opacity;
+    // the dot over the base (premultiplied)
+    vec3 under = colorBg.rgb * 0.85;
+    vec3 rgb = col * alpha + under * veil * (1.0 - alpha);
+    float outA = alpha + veil * (1.0 - alpha);
+    fragColor = vec4(rgb, outA) * qt_Opacity;
 }
