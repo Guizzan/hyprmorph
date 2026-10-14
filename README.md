@@ -64,17 +64,18 @@ matugen colours in `~/.config/ml4w/colors/colors.json`) between morphs.
 | `detail` | `0.10` | contrast that counts as content; lower = more pixels fly |
 | `duration`, `stagger`, `curl` | `0.3`, `0.35`, `0.18` | seconds, take-off spread, path bend |
 | `blob_size`, `blob_trail`, `blob_wobble` | `160`, `1.6`, `1.0` | drag blob: half its longer side, tail length in blob sizes, outline wobble |
-| `bar_pixels`, `bar_pixel_density`, `bar_pixel_react` | `true`, `1.0`, `1.0` | floating pixels in the ML4W bar and dock (see below) |
+| `bar_pixels`, `bar_pixel_density`, `bar_pixel_react` | `true`, `1.0`, `1.0` | dot-matrix background of the ML4W bar and dock (see below) |
 
 ## Floating pixels in the ML4W bar and dock
 
-`extras/ml4w-bar-pixels/` turns the pills of the [ML4W](https://github.com/mylinuxforwork/dotfiles) Quickshell bar
-and dock into a small physics world: the pill background is hidden (also turn off any compositor glass on those
-layers) and ~1000 tiny particles live inside it - heavy grains that fall, bounce, collide and pile up like sand, and
-floating dust with Brownian motion. The cursor stirs them (its velocity is transferred, it pushes them aside), the
-bar / dock sliding or resizing makes them slosh, and on hide / show a spray of pixels flies off in the direction of
-the slide. Text and icons get a soft dark halo so they stay readable on any wallpaper. Install with
-`extras/ml4w-bar-pixels/patch-pixels.sh` (idempotent; re-run after ML4W updates). It reads the same settings file.
+`extras/ml4w-bar-pixels/` replaces the solid pill background of the
+[ML4W](https://github.com/mylinuxforwork/dotfiles) Quickshell bar and dock with a living dot-matrix drawn by a GPU
+shader (`dots.frag`): a fine grid of round, anti-aliased dots in the theme's background colour that dissolves softly
+toward the pill's edge, a slow wave of light flowing across it, a few dots twinkling in the accent colours, and a
+spotlight + lens around the cursor (dots light up and bulge outward). Expanding the bar sends a ripple ring through
+it; text and icons get a soft dark halo. Install with `extras/ml4w-bar-pixels/patch-pixels.sh` (idempotent; re-run
+after ML4W updates; also turn off any compositor glass on those layers). It reads the same settings file
+(`bar_pixel_density` = dot density, `bar_pixel_react` = cursor glow and lens).
 
 ## See also
 
