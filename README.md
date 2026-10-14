@@ -68,8 +68,8 @@ matugen colours in `~/.config/ml4w/colors/colors.json`) between morphs.
 
 ## Floating pixels in the ML4W bar and dock
 
-`extras/ml4w-bar-pixels/` adds a field of floating, twinkling pixels in the theme colours behind the modules of the
-[ML4W](https://github.com/mylinuxforwork/dotfiles) Quickshell bar and the icons of its dock. The cursor pushes them
+`extras/ml4w-bar-pixels/` replaces the pill background of the
+[ML4W](https://github.com/mylinuxforwork/dotfiles) Quickshell bar and its dock with a dense cloud of floating, twinkling pixels in the theme colours. The cursor pushes them
 away like a force field and sheds sparks as it moves; expanding the bar throws a burst. Install with
 `extras/ml4w-bar-pixels/patch-pixels.sh` (idempotent; re-run after ML4W updates). It reads the same settings file.
 

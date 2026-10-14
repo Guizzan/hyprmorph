@@ -40,7 +40,6 @@ if [ -f "$bar" ]; then
             cursor: pixelHover.hovered
                 ? Qt.point(pixelHover.point.position.x - anchors.margins, pixelHover.point.position.y - anchors.margins)
                 : Qt.point(-1000, -1000)
-            opacity: pillBg.opacity
         }
         Connections {
             target: pill
@@ -49,6 +48,30 @@ if [ -f "$bar" ]; then
 
 '
 fi
+
+# Only pixels: hide the pill background and its shadow.
+hide_pill() { # file
+    python3 -I - "$1" <<'PY'
+import sys
+path = sys.argv[1]
+s = open(path).read()
+if "PIXEL-NO-PILL" in s:
+    sys.exit(0)
+a = """            id: pillBg
+            anchors.fill: parent
+"""
+b = """        RectangularShadow {
+            anchors.fill: pillBg
+"""
+if s.count(a) != 1 or s.count(b) != 1:
+    print("patch-pixels: pill anchors not found in", path, file=sys.stderr); sys.exit(1)
+s = s.replace(a, a + "            visible: false // PIXEL-NO-PILL: only pixels\n", 1)
+s = s.replace(b, b + "            visible: false // PIXEL-NO-PILL\n", 1)
+open(path, "w").write(s)
+print("patch-pixels: pill hidden in", path)
+PY
+}
+[ -f "$bar" ] && hide_pill "$bar"
 
 if [ -f "$dock" ]; then
     install_component "$(dirname "$dock")"
@@ -66,7 +89,6 @@ if [ -f "$dock" ]; then
             cursor: pixelHover.hovered
                 ? Qt.point(pixelHover.point.position.x - anchors.margins, pixelHover.point.position.y - anchors.margins)
                 : Qt.point(-1000, -1000)
-            opacity: pillBg.opacity
         }
         Connections {
             target: root
@@ -74,4 +96,5 @@ if [ -f "$dock" ]; then
         }
 
 '
+    hide_pill "$dock"
 fi

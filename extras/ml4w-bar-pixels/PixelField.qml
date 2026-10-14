@@ -1,4 +1,5 @@
-// PixelField — floating pixels behind the bar / dock content (hyprmorph theme).
+// PixelField — the bar / dock made of floating pixels (hyprmorph theme): the pill
+// background is hidden, a dense cloud of pixels in its shape takes its place.
 // Square pixels in the theme colours drift and twinkle inside the pill; the
 // cursor pushes them away like a force field and sheds sparks as it moves;
 // burst() throws a puff of pixels (used when the bar expands).
@@ -90,8 +91,8 @@ Item {
             source: Qt.resolvedUrl("pixel.png")
             color: root.colorA
             colorVariation: 0.08
-            alpha: 0.55
-            alphaVariation: 0.35
+            alpha: 0.75
+            alphaVariation: 0.25
             entryEffect: ImageParticle.Fade
         }
         ImageParticle {
@@ -100,8 +101,8 @@ Item {
             source: Qt.resolvedUrl("pixel.png")
             color: root.colorB
             colorVariation: 0.08
-            alpha: 0.45
-            alphaVariation: 0.35
+            alpha: 0.6
+            alphaVariation: 0.3
             entryEffect: ImageParticle.Fade
         }
         ImageParticle {
@@ -119,7 +120,7 @@ Item {
             system: sys
             group: "a"
             anchors.fill: parent
-            emitRate: root.active ? Math.max(0.5, root.width * root.height / 1400 * root.density) : 0
+            emitRate: root.active ? Math.max(4, root.width * root.height / 170 * root.density) : 0
             lifeSpan: 4200
             lifeSpanVariation: 1800
             size: 3
@@ -131,7 +132,7 @@ Item {
             system: sys
             group: "b"
             anchors.fill: parent
-            emitRate: root.active ? Math.max(0.3, root.width * root.height / 2400 * root.density) : 0
+            emitRate: root.active ? Math.max(2, root.width * root.height / 300 * root.density) : 0
             lifeSpan: 4800
             lifeSpanVariation: 2000
             size: 2
